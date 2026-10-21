@@ -1,0 +1,296 @@
+---
+title: "BIOL90042 Final Project: Population Genetics"
+author: "Sunny"
+format: 
+  html:
+    toc: true
+    embed-resources: true
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Population genetics
+
+This section analyses the population genetics data in `prs.Rda`.
+
+The file contains two objects:
+
+- `ca_co_genotypes`: participant genotype dosage data
+- `gwas_top_hits`: GWAS information for the 15 loci used to calculate the polygenic risk score (PRS)
+
+For each participant, the PRS is calculated as:
+
+\[ PRS = \sum (\text{dosage} \times \beta) \]
+
+where `dosage` is the number of copies of the risk allele at a locus and `beta` is the effect size from the GWAS.
+
+## Setup
+
+```{r}
+library(tidyverse)
+
+load("data/prs.Rda")
+```
+
+```{r}
+# Inspect the data
+head(ca_co_genotypes)
+head(gwas_top_hits)
+```
+
+# Question 1
+
+## Calculate a PRS for each participant. Which participant has the highest PRS? The lowest?
+
+To determine which participant has the highest PRS, we need to link each participant’s genotype at the relevant loci with the corresponding effect sizes from the GWAS top hits dataset. Since ca_co_genotypes is stored in wide format, with each locus represented as a separate column, it first needs to be reshaped into long format using pivot_longer() so that each participant–locus combination can be matched consistently with the rows in gwas_top_hits.
+
+```{r}
+genotypes_long <- ca_co_genotypes %>%
+  pivot_longer(
+    cols = -c(donorid, status),
+    names_to = "locus",
+    values_to = "dosage"
+  )
+
+head(genotypes_long) #column should be consistent with gwas_top_hits now
+```
+
+Now that the genotype_long dataframe contains a locus column, we can use this column to join it with gwas_top_hits. This allows us to add the GWAS information needed to calculate the PRS, such as the effect size for each locus, onto the participant genotype data. We can do this using left_join(), matching the shared locus column between genotype_long and gwas_top_hits.
+
+```{r}
+prs_data <- genotypes_long %>%
+  left_join(gwas_top_hits, by = "locus")
+
+head(prs_data)
+```
+
+Now that the genotype and GWAS information have been combined into a single dataframe (prs_data), we can use mutate() to create a new column called locus_score. This column represents the contribution of each locus to the participant’s PRS and is calculated by multiplying the genotype dosage by the corresponding GWAS beta effect size, as shown in the PRS formula above.
+
+```{r}
+prs_data <- prs_data %>%
+  mutate(
+    locus_score = dosage * beta #create a new column
+  )
+
+head(prs_data) #new PRS mutated columns "locus_score"
+```
+
+Before adding the locus scores together, we can also check that each donor has all 15 loci and that no GWAS beta values are missing.
+
+```{r}
+prs_data %>%
+  summarise(
+    n_loci = n_distinct(locus),
+    missing_beta = sum(is.na(beta)),
+    .by = donorid
+  ) %>%
+  summarise(
+    min_loci = min(n_loci),
+    max_loci = max(n_loci),
+    donors_with_missing_beta = sum(missing_beta > 0)
+  )
+```
+
+Inspecting the newly transformed prs_data dataframe, it now has a locus_score column as the right-most column in the dataframe. This column basically shows the locus scores across all 15 loci. As such, 15 rows are designated to each donor based on their ID, and since each person now has 15 associated locus scores, we need to add them together. This is where we can use sum().
+
+However, this gets more specific because we need to group by donorID, and since each person only has one status (either case or control), we should also include status alongside donorID. As such, we can use summarise() to reduce the number of rows. By grouping by donorID and status, R will add together the locus_score values belonging to the same donor, creating a new PRS column. This gives one PRS value for each donor while keeping their case/control status attached.
+
+```{r}
+participant_prs <- prs_data %>%
+  summarise(
+    PRS = sum(locus_score),
+    .by = c(donorid, status)
+  )
+
+head(participant_prs)
+```
+
+Inspecting the dataframe now, you can see that the number of rows has decreased significantly to 300, which matches the number of donorIDs. It now only has two accompanying columns, status and PRS, so from here it should be very easy to sort the participants based on their PRS.
+
+```{r}
+participant_prs %>%
+  slice_max(
+    PRS,
+    n = 1,
+    with_ties = FALSE
+  )
+```
+
+### d029 (case status) has 2.291 PRS
+
+```{r}
+participant_prs %>%
+  slice_min(
+    PRS,
+    n = 1,
+    with_ties = FALSE
+  )
+```
+
+### d210 (case status) has 0.31 PRS
+
+# Question 2
+
+## Plot and describe the distribution of PRS for cases and controls. Include appropriate descriptive statistics.
+
+For question two, we carry on from our participant_PRS dataframe. To understand the distribution of PRS for cases and controls, the donorID column does not really matter anymore, as we now want descriptive statistics grouped by status (case or control). This is useful because we have one less column to worry about, and since we are grouping based on status, this can be easily controlled using the .by = status command.
+
+We also want an N column to show the number of cases and controls in each group, which I imagine may be split 50/50, but we can check this directly. We would then use basic summary functions, since we're comparing two groups, I reckon the best visualisation is using a boxplot which would require the following stats/functions: mean(), median(), sd(), min(), and max(), assigning each of these to its own new column.
+
+```{r}
+prs_summary <- participant_prs %>%
+  summarise(
+    n = n(),
+    mean_PRS = mean(PRS),
+    median_PRS = median(PRS),
+    sd_PRS = sd(PRS),
+    min_PRS = min(PRS),
+    max_PRS = max(PRS),
+    .by = status
+  )
+
+prs_summary
+```
+
+## Visualise the distributions
+
+Now we can see that there are 150 participants in each group. Cases had a higher mean PRS of 1.207 compared with 1.008 for controls. The standard deviation was also slightly higher for cases, at 0.395 compared with 0.332, suggesting that their scores were somewhat more spread out.
+
+Since we now have the groups clearly separated, and boxplots can effectively visualise two categorical groups while also showing spread, median, and overall distribution, we can go ahead and visualise the distribution of PRS in PD cases and controls. This would be based on status on the x-axis and PRS on the y-axis.
+
+```{r}
+participant_prs %>%
+  ggplot(aes(x = status, y = PRS, fill = status)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.6) +
+  labs(
+    x = "PD status",
+    y = "Polygenic risk score (PRS)",
+    title = "Distribution of PRS in PD cases and controls",
+    fill = "Status"
+  ) +
+  theme_minimal()
+```
+
+From the boxplot, PD cases appear to have a higher PRS distribution compared with controls, with the median PRS being higher in the case group. However, there is still substantial overlap between the two groups, meaning that PRS alone does not completely separate cases from controls.
+
+```{r}
+# Compare the shapes and overlap of the PRS distributions
+participant_prs %>%
+  ggplot(aes(x = PRS, fill = status, colour = status)) +
+  geom_density(alpha = 0.3) +
+  labs(
+    x = "Polygenic risk score (PRS)",
+    y = "Density",
+    title = "PRS distributions in PD cases and controls",
+    fill = "PD status",
+    colour = "PD status"
+  ) +
+  theme_minimal()
+```
+
+**Description:**
+
+Looking at the density plot, the case group appears to have higher PRS values overall compared with controls. The case curve peaks around \~1.3, while the control curve peaks closer to 1.0-1.1.
+
+Both distributions have one main peak, although neither is perfectly symmetrical. The case group appears slightly more spread out and extends further towards higher PRS values. This also matches the standard deviations, which were 0.395 for cases and 0.332 for controls. Overall, cases tend to have higher PRS values, but there is still substantial overlap between the two groups, meaning that many cases and controls have similar scores.
+
+# Question 3
+
+## Is there a statistically significant difference in PRS between cases and controls?
+
+Looking at the previous distributions, PD cases appear to have higher PRS values compared with controls, but since there is substantial overlap between the two groups, we cannot tell from the graphs alone whether the difference is statistically significant. Before choosing a statistical test, we need to first consider whether the observations are independent and check whether PRS is approximately normally distributed within each group.
+
+## Check independence
+
+Each donor should contribute only one PRS value and belong to either the case or control group. We can check whether there are any repeated donor IDs in our final dataset.
+
+```{r}
+# Check the number of observations and unique donors overall
+participant_prs %>%
+  summarise(
+    n_participants = n(),
+    n_unique_donors = n_distinct(donorid)
+  )
+```
+
+The results show that there are 300 observations and 300 unique donor IDs, so each donor appears once in the final dataset. This supports the absence of repeated observations in this dataset. However, unique IDs do not establish that participants are unrelated or independently sampled, so independence remains an assumption based on the study design.
+
+## Check normality
+
+We first use Q-Q plots to compare the PRS distributions with a normal distribution, separately for cases and controls.
+
+```{r}
+participant_prs %>%
+  ggplot(aes(sample = PRS)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~ status) +
+  labs(
+    title = "Q-Q plots of PRS by PD status",
+    x = "Theoretical normal quantiles",
+    y = "Observed PRS"
+  ) +
+  theme_minimal()
+```
+
+Looking at the Q-Q plots, most points follow the reference line reasonably closely, particularly through the centre of each distribution. However, controls show some departures, particularly in the tails. We also use the Shapiro-Wilk test to assess normality within each group.
+
+```{r}
+# Cases
+participant_prs %>%
+  filter(status == "case") %>%
+  pull(PRS) %>%
+  shapiro.test()
+```
+
+```{r}
+# Controls
+participant_prs %>%
+  filter(status == "ctrl") %>%
+  pull(PRS) %>%
+  shapiro.test()
+```
+
+**Interpretation:**
+
+For cases, the Shapiro-Wilk p-value was 0.458, which is above 0.05, so there is no strong evidence that the distribution differs from normal. However, controls had a p-value of 0.032, which is below 0.05, suggesting some deviation from normality. Looking back at the Q-Q plots, these deviations appear relatively small. As such, we can first compare the means using Welch’s t-test, but we should also use a Wilcoxon test to see whether we reach the same conclusion without assuming normality.
+
+```{r}
+# Compare mean PRS without assuming equal variances
+t.test(
+  PRS ~ status,
+  data = participant_prs,
+  var.equal = FALSE
+)
+```
+
+The p-value (3.783e-06) is much smaller than 0.05, suggesting that there is a statistically significant difference in mean PRS between cases and controls. Cases had a higher mean PRS of 1.207 compared with 1.008 for controls. This is consistent with what we saw in the plots, where cases generally had higher PRS values, although there was still substantial overlap between the two groups.
+
+## Further rationale
+
+Although Welch’s t-test showed a significant difference in mean PRS between cases and controls, the control group showed some deviation from normality. As such, we can also use a Wilcoxon rank-sum test to check whether there is still evidence of a difference without assuming normally distributed values. A higher PRS means a greater combined contribution from the PD-associated risk alleles included in the score. If cases tend to have higher scores, this would support an association between these genetic risk factors and PD status in this dataset.
+
+## Wilcoxon rank-sum test
+
+Since the control group showed some deviation from normality, we can also use a Wilcoxon rank-sum test to compare PRS between cases and controls without assuming normally distributed values. This allows us to check whether there is evidence that PRS values tend to be higher or lower in one group. Each donor contributes one PRS value, and we assume that the observations are independent.
+
+In this dataset, PRS combines the number of risk alleles a participant carries at the 15 loci with their corresponding GWAS effect sizes. As such, a higher PRS represents a greater combined contribution from these PD-associated risk alleles. If cases tend to have higher PRS values than controls, this would support an association between the genetic risk captured by this score and PD status, but this should not be confused with patients with a higher score having PD.
+
+The null hypothesis is that the PRS distributions are the same in cases and controls, while the alternative hypothesis is that they differ. We use a two-sided test because we are testing for a difference in either direction, with a significance level of 0.05.
+
+```{r}
+# Compare PRS between cases and controls using a rank-based test
+wilcox.test(PRS ~ status, data = participant_prs)
+```
+
+**Statistical interpretation & Final conclusion:**
+
+The Wilcoxon rank-sum test gave a p-value below 0.001 (W = 14710), which is much smaller than 0.05. As such, we reject the null hypothesis and conclude that there is a statistically significant difference in the PRS distributions between cases and controls. Looking back at the plots and descriptive statistics, cases generally had higher scores, with a median PRS of approximately 1.250 compared with 1.021 for controls. This helps explain the direction of the difference, although there is still substantial overlap between the groups.
+
+Since PRS combines risk-allele dosages with their corresponding GWAS effect sizes, higher scores in cases suggest a greater combined contribution from the PD-associated risk alleles included in this score. This supports an association between the genetic risk captured by the 15-locus PRS and PD status in this dataset. However, it does not mean that every case has a higher score than every control, or that PRS alone can determine whether someone has PD.
+
+The Wilcoxon result also agrees with the evidence of a group difference from Welch’s t-test, meaning this conclusion is supported without assuming normally distributed PRS values. However, because the groups differ somewhat in shape and spread, we cannot attribute the significant Wilcoxon result specifically to a difference in medians. We therefore interpret it alongside the plots and summary statistics as evidence that cases tend to have higher PRS values overall.
