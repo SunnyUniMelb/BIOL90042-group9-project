@@ -322,3 +322,21 @@ The dataset labels cmpd_7429 as a LARGE1 agonist. Its **35.9% higher mean signal
 ## Answer to Question 3
 
 The annotated target-action pairs are **APBA3 agonism, RIT2 agonism and LARGE1 agonism**. Their established functions involve protein trafficking, intracellular signalling and glycosylation, respectively. RIT2 has particularly relevant experimental literature linking it to Parkinson's-related neuronal pathology, while the APBA3 and LARGE1 references explain target functions without establishing MPP protection. The viability results and these annotations together identify useful candidates for further study, but do not confirm a mechanism of protection. The internal compound identifiers also do not provide enough information to identify a recognised drug or its full pharmacology.
+
+# References
+
+Caster, A. H., & Kahn, R. A. (2013). Recruitment of the Mint3 adaptor is necessary for export of the amyloid precursor protein (APP) from the Golgi complex. *Journal of Biological Chemistry, 288*(40), 28567–28580. <https://doi.org/10.1074/jbc.M113.481101>
+
+Inamori, K., Yoshida-Moriguchi, T., Hara, Y., Anderson, M. E., Yu, L., & Campbell, K. P. (2012). Dystroglycan function requires xylosyl- and glucuronyltransferase activities of LARGE. *Science, 335*(6064), 93–96. <https://doi.org/10.1126/science.1214115>
+
+*The small GTPase Rit2 modulates LRRK2 kinase activity, is required for lysosomal function and protects against alpha-synuclein neuropathology.* (2023). *npj Parkinson's Disease*. <https://doi.org/10.1038/s41531-023-00484-2>
+
+National Center for Biotechnology Information. (n.d.). *RIT2: Ras like without CAAX 2 \[Homo sapiens (human)\]*. NCBI Gene, Gene ID 6014. <https://www.ncbi.nlm.nih.gov/gene/6014>. Accessed 22 October 2026.
+
+R Core Team. (n.d.). *Adjust P-values for multiple comparisons: p.adjust*. R statistical documentation. <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/p.adjust.html>. Accessed 22 October 2026.
+
+Zeglinski, K., & Argyropoulos, D. (2026). *BIOL90042 ebook 2026*. WEHI Education. [Course notebook](https://wehi-education.github.io/BIOL90042_R_Course/), including [Workshop 3: Data-wrangling](https://wehi-education.github.io/BIOL90042_R_Course/workshop_3.html), [Workshop 4: Plotting with ggplot2](https://wehi-education.github.io/BIOL90042_R_Course/workshop_4.html), [Workshop 6: Statistics in R](https://wehi-education.github.io/BIOL90042_R_Course/workshop_6.html), and [Tutorial 9: Final project](https://wehi-education.github.io/BIOL90042_R_Course/tutorial_9.html). The drug-screening dataset and experimental description were supplied as part of the course project.
+
+# Acknowledgement of AI use
+
+I used OpenAI's ChatGPT/Codex to help refine code, improve sentence structure and clarity, and develop the explanation linking the results to the disease context. AI also assisted with locating relevant literature and suggesting additions to the interpretation. I carried out the analysis using code provided in the WEHI course notebook, with modifications for this dataset. I remain responsible for checking the code, results, interpretations and cited sources. The underlying course materials, dataset and published research are acknowledged separately above.
