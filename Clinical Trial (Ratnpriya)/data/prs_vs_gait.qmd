@@ -1,0 +1,216 @@
+---
+title: "BIOL90042 Final Project: PRS and Gait"
+author: "Ratnpriya"
+format: 
+  html:
+    toc: true
+    embed-resources: true
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Bringing the datasets together
+
+## Is there any relationship between the PRS and gait of patients in the clinical trial?
+
+To answer this question, we need information from two different arms of the study: the polygenic risk score (PRS) from the population genetics data (`prs.Rda`), and the gait data from the clinical trial (`gait.Rda`). Participants are identified by a unique `donorid`, so we can use this column to connect the two datasets. Only participants who appear in both datasets can be used.
+
+## Setup
+
+```{r}
+# Load the tidyverse packages
+library(tidyverse)
+
+# Load the population genetics data and the clinical trial data
+# (both files sit in the same folder as this document)
+load("prs.Rda")
+load("gait.Rda")
+```
+
+## Step 1: Calculate the PRS for each participant
+
+We calculate the PRS in the same way as in the population genetics section: reshape the genotypes into long format, join the GWAS effect sizes (beta) for each locus, multiply dosage by beta, and add up the 15 locus scores for each donor.
+
+```{r}
+# Reshape the genotypes so that each row is one donor at one locus
+genotypes_long <- ca_co_genotypes %>%
+  pivot_longer(
+    cols = -c(donorid, status),
+    names_to = "locus",
+    values_to = "dosage"
+  )
+
+# Add the GWAS effect size (beta) for each locus, and calculate the score for each locus
+prs_data <- genotypes_long %>%
+  left_join(gwas_top_hits, by = "locus") %>%
+  mutate(
+    locus_score = dosage * beta # dosage x beta for each locus
+  )
+
+# Add the 15 locus scores together to get one PRS per donor
+participant_prs <- prs_data %>%
+  summarise(
+    PRS = sum(locus_score),
+    .by = c(donorid, status)
+  )
+
+head(participant_prs)
+```
+
+## Step 2: Calculate the gait score for each participant
+
+We calculate the gait score in the same way as in the clinical trial section: the standard deviation of each participant's orientation over the 700 seconds. A larger gait score means a less smooth gait and poorer balance.
+
+```{r}
+# Reshape the gait data so that each row is one donor at one second
+gait_long <- gait_data %>%
+  pivot_longer(
+    cols = ends_with("_secs"),
+    names_to = "time",
+    values_to = "orientation"
+  )
+
+# Calculate the gait score (standard deviation of orientation) for each participant
+participant_gait <- gait_long %>%
+  summarise(
+    gait_score = sd(orientation),
+    .by = c(donorid, treatment, age, exercise)
+  )
+
+head(participant_gait)
+```
+
+## Step 3: Join the two datasets using donorid
+
+Before joining, we check how many of the 16 clinical trial participants also appear in the PRS data.
+
+```{r}
+# Which clinical trial participants are missing from the PRS data? (should be none if all 16 overlap)
+participant_gait %>%
+  anti_join(participant_prs, by = "donorid")
+```
+
+```{r}
+# Keep only participants who appear in both datasets
+gait_prs <- participant_gait %>%
+  inner_join(participant_prs, by = "donorid")
+
+nrow(gait_prs) # number of participants with both a PRS and a gait score
+
+# Check the case/control status of these participants
+gait_prs %>%
+  count(status)
+```
+
+All 16 clinical trial participants were also present in the population genetics dataset, so all 16 could be used in this analysis. All 16 were classified as cases, which is consistent with the clinical trial only including patients with PD.
+
+## Step 4: Look at the relationship
+
+We start with a scatterplot of PRS against gait score. We colour the points by treatment, because treatment was found to be related to gait in the clinical trial section.
+
+```{r}
+# Scatterplot of PRS vs gait score
+gait_prs %>%
+  ggplot(aes(x = PRS, y = gait_score, colour = treatment)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, aes(group = 1), colour = "black") + #overall trend line
+  labs(
+    x = "Polygenic risk score (PRS)",
+    y = "Gait score (SD of orientation, degrees)",
+    title = "PRS and gait score",
+    colour = "Treatment"
+  ) +
+  theme_minimal()
+```
+
+**Description of the plot:**
+
+The PRS values of the 16 participants fall into two separate groups: a lower-scoring group (PRS about 0.3 to 0.65) and a higher-scoring group (PRS about 1.7 to 2.0). The trend line has a slight downward slope, but gait scores vary widely within both PRS groups, so there is no clear relationship between PRS and gait score. In the higher-PRS group, participants receiving L-DOPA generally have higher gait scores than those receiving the new compound, which is consistent with the treatment effect seen in the clinical trial analysis and suggests that treatment explains more of the variation in gait than PRS does.
+
+## Step 5: Test the relationship
+
+We use a Pearson correlation to test whether there is a linear relationship between PRS and gait score. This assumes a roughly linear relationship (which we checked in the scatterplot) and approximately normal variables, so we check normality of both variables and also run a Spearman correlation, which is rank-based and does not assume normality.
+
+```{r}
+# Shapiro-Wilk tests for PRS and gait score (p > 0.05 = no evidence against normality)
+shapiro.test(gait_prs$PRS)
+shapiro.test(gait_prs$gait_score)
+```
+
+```{r}
+# Pearson correlation between PRS and gait score
+cor.test(gait_prs$PRS, gait_prs$gait_score)
+```
+
+```{r}
+# Spearman correlation: rank-based check that does not assume normality
+cor.test(gait_prs$PRS, gait_prs$gait_score, method = "spearman")
+```
+
+**Interpretation:**
+
+The PRS values were not normally distributed (Shapiro-Wilk p \< 0.001), with participants falling into a lower-scoring group and a higher-scoring group, whereas gait score was consistent with normality (p = 0.872). The Pearson correlation should therefore be interpreted cautiously, and the rank-based Spearman correlation is the more appropriate test. There was no significant relationship between PRS and gait score (Spearman rho = -0.28, p = 0.299; Pearson r = -0.18, 95% CI -0.62 to 0.34, p = 0.497). Both coefficients were weakly negative, but the confidence interval is wide and includes zero, so with only 16 participants we cannot rule out a modest relationship in either direction. A non-significant result does not show that no relationship exists.
+
+## Step 6: Take treatment, age and exercise into account
+
+In the clinical trial section, treatment, age and exercise were all related to gait. If the PRS is related to any of these, they could hide or create a relationship with gait. We first check that PRS is similar across treatment and exercise groups, and then fit a model that includes PRS together with these variables.
+
+```{r}
+# Mean PRS in each treatment group, and in each exercise group
+gait_prs %>%
+  summarise(n = n(), mean_PRS = mean(PRS), sd_PRS = sd(PRS), .by = treatment)
+
+gait_prs %>%
+  summarise(n = n(), mean_PRS = mean(PRS), sd_PRS = sd(PRS), .by = exercise)
+```
+
+```{r}
+# Correlation between PRS and age
+cor.test(gait_prs$PRS, gait_prs$age)
+
+# Spearman correlation between PRS and age (PRS is not normal, so this rank-based check is safer)
+cor.test(gait_prs$PRS, gait_prs$age, method = "spearman")
+```
+
+Mean PRS was almost identical in the two treatment groups (1.31 for the new compound and 1.34 for L-DOPA) and was not significantly correlated with age (r = -0.19, 95% CI -0.63 to 0.33, p = 0.471). A Spearman correlation, which does not assume normality, gave the same conclusion (rho = -0.20, p= 0.493). Mean PRS was somewhat higher in participants who did the exercise routine (1.51) than in those who did not (1.13), although both groups showed a wide spread of PRS values. PRS therefore does not appear to be strongly related to treatment or age.
+
+```{r}
+# Model with PRS only
+prs_only_model <- lm(gait_score ~ PRS, data = gait_prs)
+summary(prs_only_model)
+```
+
+```{r}
+# Model with PRS, adjusted for treatment, age and exercise
+prs_adjusted_model <- lm(gait_score ~ PRS + treatment + age + exercise, data = gait_prs)
+summary(prs_adjusted_model)
+```
+
+Since this is a linear model, we check its assumptions using the residuals.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1)) # show the 4 diagnostic plots together
+plot(prs_adjusted_model)
+par(mfrow = c(1, 1)) # reset
+```
+
+```{r}
+# Shapiro-Wilk test on the model residuals (p > 0.05 = no evidence against normality)
+shapiro.test(residuals(prs_adjusted_model))
+```
+
+**Interpretation & Final conclusion:**
+
+In a model with PRS alone, PRS was not significantly associated with gait score (coefficient -1.04, p = 0.497), and it explained very little of the variation in gait (R\^2 = 0.03). After adjusting for treatment, age and exercise, the PRS coefficient was +0.43 (p = 0.387), which was still not significant and was in the opposite direction, suggesting there is no consistent relationship. In this adjusted model, the new compound (-3.26, p \< 0.001), exercise (-3.71, p \< 0.001) and older age (+0.30 per year, p \< 0.001) were all significantly associated with gait score, as in the clinical trial analysis, and together the variables explained most of the variation in gait (R\^2 = 0.93). The residual plots showed no clear pattern, no participant had a large influence on the model, and the Shapiro-Wilk test on the residuals gave no evidence against normality (p = 0.660), so the model assumptions appear reasonable. Overall, we found no evidence that the PRS is related to gait in these patients. However, with only 16 participants we had little power to detect a modest relationship, and the PRS was built from 15 loci chosen for PD risk and not for motor symptoms, so these results do not show that genetic risk has no influence on gait.
+
+**Limitations:**
+
+- The sample is small (at most 16 participants), so the analysis has little power to detect a relationship, and the estimates are imprecise.
+- The PRS values of these 16 participants form two separate clusters, with none in the middle, so we cannot tell how gait changes across intermediate PRS values.
+- The PRS was built from 15 loci that were chosen because they are associated with PD risk. They were not chosen to predict gait severity, so the score may not be expected to capture motor symptoms.
+- This analysis shows an association (or the lack of one) in this dataset, and does not show that genetic risk causes differences in gait.
