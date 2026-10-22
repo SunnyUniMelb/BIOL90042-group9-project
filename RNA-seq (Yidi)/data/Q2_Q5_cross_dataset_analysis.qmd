@@ -1,0 +1,140 @@
+---
+title: "Cross-dataset analysis: RNA-seq cases and controls"
+author: "Group 9"
+format:
+  html:
+    toc: true
+    number-sections: true
+jupyter: python3
+execute:
+  echo: true
+  warning: false
+---
+
+# Question 2
+
+## Do any variables other than gene expression distinguish the RNA-seq cases from controls?
+
+The RNA-seq sample metadata were linked to the population-genetics dataset using the unique `donorid`. The 15-locus polygenic risk score (PRS) was calculated as the sum of genotype dosage multiplied by the corresponding GWAS beta value. A sample-level ordination was then coloured by disease group and by PRS to assess whether genetic risk showed a pattern similar to the expression-based separation.
+
+```{python}
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.spatial.distance import pdist, squareform
+from scipy import stats
+import rdata
+import pyreadr
+
+base = Path(".")
+
+# Read the RNA-seq DGEList and extract the counts and sample metadata.
+dge = rdata.read_rda(str(base / "rnaseq.Rda"))["dge"]
+counts = np.asarray(dge["counts"])
+sample_info = dge["samples"].copy()
+sample_info.index.name = "sample"
+sample_info = sample_info.reset_index().rename(columns={"group": "rna_group"})
+
+# Read the PRS data and calculate the score from all 15 loci.
+prs_objects = pyreadr.read_r(str(base / "prs.Rda"))
+genotypes = prs_objects["ca_co_genotypes"].copy()
+gwas = prs_objects["gwas_top_hits"].copy()
+beta = gwas.set_index("locus")["beta"]
+loci = list(beta.index)
+genotypes["PRS"] = sum(genotypes[locus] * beta[locus] for locus in loci)
+
+analysis_data = sample_info.merge(
+    genotypes[["donorid", "PRS", "status"]],
+    on="donorid",
+    how="left"
+)
+
+analysis_data[["sample", "donorid", "rna_group", "status", "PRS"]]
+```
+
+The RNA-seq donors had the following PRS values:
+
+```{python}
+prs_summary = (
+    analysis_data.groupby("rna_group", as_index=False)
+    .agg(
+        n=("PRS", "size"),
+        mean_PRS=("PRS", "mean"),
+        median_PRS=("PRS", "median"),
+        sd_PRS=("PRS", "std"),
+        minimum=("PRS", "min"),
+        maximum=("PRS", "max"),
+    )
+)
+prs_summary.round(3)
+```
+
+Controls had PRS values between **0.339 and 0.547**, with a mean of **0.490**. Cases had a higher mean PRS of **1.285** and a wider range of **0.315-1.864**. Thus, PRS provides an additional distinction between the RNA-seq groups: most cases had higher genetic-risk scores than controls. However, the separation was not complete because three cases had relatively low PRS values: d001, d239 and d104.
+
+The following figure shows a classical multidimensional scaling plot based on log-CPM expression values. The first panel is coloured by RNA-seq disease group, while the second is coloured continuously by PRS.
+
+```{python}
+# Calculate log-CPM values and a classical MDS ordination.
+lib_sizes = counts.sum(axis=0)
+log_cpm = np.log2((counts / lib_sizes[None, :]) * 1e6 + 2)
+
+# Classical MDS from Euclidean distances between samples.
+distance_matrix = squareform(pdist(log_cpm.T, metric="euclidean"))
+n = distance_matrix.shape[0]
+J = np.eye(n) - np.ones((n, n)) / n
+B = -0.5 * J @ (distance_matrix ** 2) @ J
+eigenvalues, eigenvectors = np.linalg.eigh(B)
+order = np.argsort(eigenvalues)[::-1]
+eigenvalues = eigenvalues[order]
+eigenvectors = eigenvectors[:, order]
+positive = eigenvalues > 0
+mds = eigenvectors[:, positive][:, :2] * np.sqrt(eigenvalues[positive][:2])
+
+mds_data = analysis_data.copy()
+mds_data["MDS1"] = mds[:, 0]
+mds_data["MDS2"] = mds[:, 1]
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), constrained_layout=True)
+
+colours = {"control": "#2166AC", "case": "#B2182B"}
+for group, group_data in mds_data.groupby("rna_group"):
+    axes[0].scatter(
+        group_data["MDS1"], group_data["MDS2"],
+        s=70, label=group, color=colours[group]
+    )
+    for _, row in group_data.iterrows():
+        axes[0].text(row["MDS1"], row["MDS2"], row["sample"], fontsize=8,
+                     ha="left", va="bottom")
+axes[0].set_title("Expression-based MDS coloured by disease group")
+axes[0].set_xlabel("MDS dimension 1")
+axes[0].set_ylabel("MDS dimension 2")
+axes[0].legend(title="RNA-seq group")
+
+scatter = axes[1].scatter(
+    mds_data["MDS1"], mds_data["MDS2"],
+    c=mds_data["PRS"], cmap="viridis", s=70
+)
+for _, row in mds_data.iterrows():
+    axes[1].text(row["MDS1"], row["MDS2"], row["sample"], fontsize=8,
+                 ha="left", va="bottom")
+axes[1].set_title("Expression-based MDS coloured by PRS")
+axes[1].set_xlabel("MDS dimension 1")
+axes[1].set_ylabel("MDS dimension 2")
+fig.colorbar(scatter, ax=axes[1], label="PRS")
+plt.show()
+```
+
+The PRS colouring broadly follows the disease-status pattern: the controls occupy the low-PRS range, whereas most case samples have higher PRS values. This indicates that genetic risk captured by these 15 loci is associated with the case-control distinction in this dataset, in addition to the transcriptional differences shown by the MDS plot. Nevertheless, PRS does not perfectly separate the samples and should not be treated as a diagnostic classifier.
+
+Age, exercise status and gait-treatment assignment cannot be used as reliable case-control discriminators for the RNA-seq samples. Only eight RNA-seq donors have corresponding records in the gait dataset, and these overlapping donors are all cases. Therefore, there are no matched RNA-seq controls with which to compare those variables.
+
+# Question 5
+
+## Summary and future research
+
+Across the four clinical-trial arms, there were 16 unique patients, with four patients in each treatment-by-exercise group. The RNA-seq analysis showed that Parkinson's disease cases and healthy controls differed in their overall gene-expression profiles, although the sample-level separation was incomplete. The PRS provided an additional distinction: controls had low scores ranging from 0.339 to 0.547, whereas most cases had substantially higher scores, with a case mean of 1.285 compared with 0.490 in controls. However, several cases had low PRS values, demonstrating that this 15-locus score does not classify individuals perfectly. Targets of positive drug-screen hits, including RIT2, APBA3, MAPK1 and LARGE1, were also differentially expressed in the RNA-seq analysis and were associated with the GO category synaptic transmission. This overlap suggests that altered synaptic biology may be relevant to PD pathology in this dataset. In contrast, PRS was not significantly correlated with gait variability in the 16 clinical-trial patients (Pearson r = -0.183, p = 0.497; Spearman rho = -0.276, p = 0.300), whereas age, exercise and treatment showed stronger exploratory relationships with gait. Future research should validate these findings in larger independent cohorts, adjust for age, sex, ancestry, batch and disease-severity variables, and perform formal pathway-enrichment analyses using a clearly defined background gene set. Follow-up experiments should also test whether the candidate drug targets causally affect synaptic function and whether the compounds improve neuronal or behavioural phenotypes rather than merely changing assay measurements.
+
+## Reproducibility note
+
+All numerical summaries and plots in this document were generated from the supplied `rnaseq.Rda` and `prs.Rda` files using the unique donor IDs. The gait-related limitations are based on the donor overlap between the supplied RNA-seq and gait metadata.
