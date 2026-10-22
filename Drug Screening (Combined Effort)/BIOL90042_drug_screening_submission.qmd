@@ -1,0 +1,324 @@
+---
+title: "BIOL90042 Final Project: Drug Screening"
+author: "Sunny"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    number-sections: false
+editor: visual
+execute:
+  echo: true
+  warning: true
+  message: false
+---
+
+# Drug screening
+
+This analysis asks whether any of the test compounds help dopaminergic neurons survive MPP exposure. The experiment uses neurons from one healthy donor, with four technical replicates for each test compound and its inactive control compound. All wells receive MPP, and luminescence is measured after 24 hours. Higher luminescence, measured in relative light units (RLU), indicates greater neuronal viability in this assay. The control compounds have the same molecular weight and constituents as their test compounds, but different chemistry and no known biological activity ([WEHI final project description](https://wehi-education.github.io/BIOL90042_R_Course/tutorial_9.html)).
+
+## Setup
+
+First, we load the tidyverse and the drug-screening data. The three objects contain the luminescence readings, the compound assigned to each well, and the target and action of each test compound.
+
+```{r}
+library(tidyverse)
+load("data/drugscreen.Rda")
+
+head(plate1)
+head(plate_meta)
+head(compound_dict)
+```
+
+# Question 1
+
+## Using geom_tile(), visualise the luminescence across the plate. Do there appear to be any spatial patterns in this data?
+
+The readings are stored with one column for each plate column. We use `pivot_longer()` to give each well its own row, then convert the row and column labels into numbers so that the heatmap follows the actual plate layout.
+
+```{r}
+plate_long <- plate1 %>%
+  pivot_longer(
+    cols = starts_with("col"),
+    names_to = "plate_col",
+    values_to = "luminescence"
+  ) %>%
+  mutate(
+    row = as.numeric(str_remove(plate_row, "row")),
+    column = as.numeric(str_remove(plate_col, "col"))
+  )
+```
+
+We plot each well as a tile, with colour showing its luminescence. Reversing the vertical axis places row 1 at the top, as it would appear on the plate.
+
+```{r}
+#| label: fig-plate-luminescence
+#| fig-width: 10
+#| fig-height: 7
+#| fig-cap: "Luminescence across the plate. Each tile represents one well; brighter colours indicate higher readings."
+
+ggplot(plate_long, aes(x = column, y = row, fill = luminescence)) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "Luminescence (RLU)") +
+  scale_y_reverse() +
+  coord_fixed() +
+  labs(
+    title = "Luminescence across the plate",
+    x = "Plate column",
+    y = "Plate row"
+  ) +
+  theme_minimal()
+```
+
+Most wells have similar luminescence, around 500 RLU, with a small number of brighter wells scattered across the plate. There is a small cluster around rows 8-10 and columns 36-38, but no clear pattern extending across whole rows or columns. The edges also do not consistently differ from the centre. This answers Question 1: there is no obvious broad spatial gradient or edge effect. However, the heatmap alone cannot tell us whether the bright wells reflect compound effects or well-specific variation, so we need to compare the test compounds with their controls.
+
+# Question 2
+
+## Which compounds are statistically significantly associated with increased neuronal viability after MPP exposure? Ensure that you check your assumptions.
+
+## Match each reading to its compound
+
+We reshape the plate metadata in the same way and join it to the readings using the well coordinates. We then separate the compound identifier from the test or control label.
+
+```{r}
+metadata_long <- plate_meta %>%
+  pivot_longer(
+    cols = starts_with("col"),
+    names_to = "plate_col",
+    values_to = "well_label"
+  )
+
+screen_data <- plate_long %>%
+  left_join(metadata_long, by = c("plate_row", "plate_col")) %>%
+  mutate(
+    id = str_remove(well_label, "_(test|ctrl)$"),
+    condition = str_extract(well_label, "test$|ctrl$")
+  )
+
+head(screen_data)
+```
+
+Before comparing the conditions, we check the number of wells for each compound and whether any readings or labels are missing.
+
+```{r}
+replicate_counts <- screen_data %>%
+  count(id, condition)
+
+replicate_counts %>%
+  count(condition, n, name = "compounds") %>%
+  knitr::kable(caption = "Number of wells per compound and condition.")
+
+screen_data %>%
+  summarise(
+    wells = n(),
+    missing_readings = sum(is.na(luminescence)),
+    missing_compounds = sum(is.na(id)),
+    missing_conditions = sum(is.na(condition))
+  ) %>%
+  knitr::kable(caption = "Checks for missing data after joining the plate information.")
+```
+
+All 192 compounds have four test wells and four control wells, giving 1,536 wells in total, with no missing readings or labels. The control wells provide a comparison for each compound under the same MPP exposure. They are not untreated neurons, so this comparison asks whether the test compound improves the signal relative to its inactive control; it does not measure restoration to an untreated baseline.
+
+## Check the assumptions
+
+Following [WEHI Workshop 6](https://wehi-education.github.io/BIOL90042_R_Course/workshop_6.html), we check normality within groups and consider independence and variance. We calculate the mean, standard deviation and Shapiro-Wilk p-value for every compound-condition group, rather than testing all raw readings together.
+
+```{r}
+group_checks <- screen_data %>%
+  summarise(
+    n = n(),
+    mean_RLU = mean(luminescence),
+    SD_RLU = sd(luminescence),
+    shapiro_p = shapiro.test(luminescence)$p.value,
+    .by = c(id, condition)
+  )
+
+group_checks %>%
+  summarise(
+    groups = n(),
+    groups_with_shapiro_p_below_005 = sum(shapiro_p < 0.05),
+    .by = condition
+  ) %>%
+  knitr::kable(caption = "Overview of the within-group normality checks.")
+```
+
+These p-values are diagnostic checks, rather than a rule for choosing a different test for each compound. With four observations per group, a non-significant result provides little assurance of normality. Some p-values below 0.05 are also expected when checking 384 groups. We therefore consider the plots as well, and inspect the significant compounds individually below.
+
+To look at the overall shape of the variation without mixing differences in compound means into the plot, we subtract each compound-condition mean from its readings and draw Q-Q plots of these centred values.
+
+```{r}
+#| label: fig-overall-normality
+#| fig-width: 9
+#| fig-height: 5
+#| fig-cap: "Q–Q plots of readings centred within each compound-condition group."
+
+screen_data <- screen_data %>%
+  mutate(
+    centred_RLU = luminescence - mean(luminescence),
+    .by = c(id, condition)
+  )
+
+ggplot(screen_data, aes(sample = centred_RLU)) +
+  geom_qq() +
+  geom_qq_line() +
+  facet_wrap(~ condition) +
+  labs(x = "Theoretical quantile", y = "Centred luminescence (RLU)") +
+  theme_minimal()
+```
+
+The centred readings lie reasonably close to the reference lines overall, without a strong systematic curve. This supports approximate normality as a working assumption, but the combined plots can hide departures within individual groups. We use Welch's t-test because it does not require equal variances. The wells are technical replicates from one donor, so treating them as independent measurements is an assumption about the assay. They do not represent four independent donors, and shared plate or culture effects could affect that assumption.
+
+## Compare test and control readings
+
+Question 2 asks specifically about an increase, so we use a one-sided Welch's t-test for each compound. The null hypothesis is that the test mean is no greater than the control mean; the alternative is that it is greater. We calculate the mean difference in RLU and the percentage increase to show the size of each effect, rather than relying on a p-value alone.
+
+```{r}
+compound_results <- screen_data %>%
+  summarise(
+    mean_test = mean(luminescence[condition == "test"]),
+    mean_ctrl = mean(luminescence[condition == "ctrl"]),
+    p_value = t.test(
+      luminescence[condition == "test"],
+      luminescence[condition == "ctrl"],
+      alternative = "greater",
+      var.equal = FALSE
+    )$p.value,
+    .by = id
+  ) %>%
+  mutate(
+    difference_RLU = mean_test - mean_ctrl,
+    increase_percent = 100 * (mean_test - mean_ctrl) / mean_ctrl,
+    adjusted_p = p.adjust(p_value, method = "BH")
+  ) %>%
+  left_join(compound_dict, by = "id") %>%
+  arrange(adjusted_p)
+
+significant_compounds <- compound_results %>%
+  filter(adjusted_p < 0.05, difference_RLU > 0)
+
+significant_compounds %>%
+  select(id, mean_ctrl, mean_test, difference_RLU,
+         increase_percent, p_value, adjusted_p) %>%
+  knitr::kable(
+    digits = c(0, 2, 2, 2, 1, 7, 7),
+    caption = "Compounds with increased luminescence after correcting all 192 comparisons."
+  )
+```
+
+We correct the p-values across all 192 comparisons before selecting the hits. The Benjamini–Hochberg procedure controls the expected proportion of false discoveries among the rejected hypotheses under its assumptions; an adjusted p-value is not the probability that a particular compound is a false positive ([R documentation](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/p.adjust.html)).
+
+Three compounds have adjusted p-values below 0.05. For **cmpd_7933**, the mean rises from **502.00 to 702.25 RLU**, a difference of **200.25 RLU (39.9%)**, with adjusted p = **0.000426**. For **cmpd_4952**, it rises from **497.50 to 706.50 RLU**, a difference of **209.00 RLU (42.0%)**, with adjusted p = **0.000426**. For **cmpd_7429**, it rises from **502.50 to 683.00 RLU**, a difference of **180.50 RLU (35.9%)**, with adjusted p = **0.015537**. These are increases in the assay signal relative to the inactive controls, rather than percentage-point increases in cell survival.
+
+## Inspect the screening hits
+
+We now display the individual readings for the three hits. This lets us check whether the mean differences are driven by one unusually high well.
+
+```{r}
+#| label: fig-screening-hits
+#| fig-width: 9
+#| fig-height: 5
+#| fig-cap: "Individual test and control wells for the three screening hits."
+
+hit_data <- screen_data %>%
+  filter(id %in% significant_compounds$id)
+
+ggplot(hit_data, aes(x = condition, y = luminescence, colour = condition)) +
+  geom_jitter(width = 0.08, height = 0) +
+  facet_wrap(~ id) +
+  labs(x = "Condition", y = "Luminescence (RLU)") +
+  theme_minimal()
+```
+
+All four test wells exceed all four control wells for each hit. The increases therefore reflect a consistent separation in the observed readings, rather than just one extreme test well. Of the three, cmpd_4952 has the largest percentage increase, although that alone does not establish that it is more effective than the other hits.
+
+We also inspect Q-Q plots for each hit and condition, alongside their standard deviations and normality-test results.
+
+```{r}
+#| label: fig-hit-normality
+#| fig-width: 9
+#| fig-height: 7
+#| fig-cap: "Within-group Q–Q plots for the three screening hits. Each panel contains four observations."
+
+ggplot(hit_data, aes(sample = luminescence)) +
+  geom_qq() +
+  geom_qq_line() +
+  facet_wrap(~ id + condition, scales = "free") +
+  labs(x = "Theoretical quantile", y = "Luminescence (RLU)") +
+  theme_minimal()
+
+group_checks %>%
+  filter(id %in% significant_compounds$id) %>%
+  knitr::kable(digits = 3,
+               caption = "Descriptive statistics and normality checks for the screening hits.")
+```
+
+The six Shapiro-Wilk p-values range from **0.138 to 0.971**, so none provides evidence against normality at the 0.05 level. However, each plot contains only four points, so neither the plots nor the tests can establish normality with confidence. The Welch results remain conditional on this assumption and on independence between wells.
+
+## Sensitivity check
+
+As a further check, we use the Wilcoxon rank-sum test taught in Workshop 6. This compares ranks without requiring normality, although it does not directly test mean differences. We keep the direction and multiple-testing correction consistent with the main analysis, applying the correction to all 192 compounds.
+
+```{r}
+wilcox_results <- screen_data %>%
+  summarise(
+    wilcox_p = wilcox.test(
+      luminescence[condition == "test"],
+      luminescence[condition == "ctrl"],
+      alternative = "greater",
+      exact = FALSE
+    )$p.value,
+    .by = id
+  ) %>%
+  mutate(wilcox_adjusted_p = p.adjust(wilcox_p, method = "BH"))
+
+wilcox_results %>%
+  filter(id %in% significant_compounds$id) %>%
+  knitr::kable(digits = 4,
+               caption = "Rank-based sensitivity results for the three Welch-test hits.")
+```
+
+The rank-based sensitivity analysis does not identify any compounds at the 5% adjusted threshold. For each of the three Welch-test hits, the approximate Wilcoxon p-value is **0.0152**, which becomes **0.7292** after correction. With only four wells per condition, rank tests have limited resolution and discard the size of the separation between readings. This does not reverse the observed increases, but it means the statistical conclusion is sensitive to the method and should not be described as robust across both tests.
+
+## Answer to Question 2
+
+Using the one-sided Welch analysis with correction across 192 compounds, **cmpd_7933, cmpd_4952 and cmpd_7429** are associated with increased luminescence after MPP exposure. Under the assay's interpretation, these are candidate compounds for improved neuronal viability. The increases are approximately **36-42% relative to their inactive controls**. However, the normality checks are limited by the small sample size, the Wilcoxon sensitivity analysis does not retain significance after correction, and the technical replicates come from one donor. These findings justify follow-up screening with independent biological replicates, rather than a conclusion that the compounds protect neurons across patients.
+
+# Question 3
+
+## What are the mechanisms of action and targets of the compounds identified in Q2?
+
+We use `compound_dict` to identify the annotated target and action for each Q2 hit. This connects the statistical results to the biological functions that could be investigated next.
+
+```{r}
+significant_compounds %>%
+  select(id, hgnc_symbol, target_enzyme, action) %>%
+  knitr::kable(
+    col.names = c("Compound", "Target gene", "Target identifier", "Annotated action"),
+    caption = "Target and action annotations for the three screening hits."
+  )
+```
+
+All three are labelled as **agonists** in the dataset. This indicates activation or enhancement of their annotated target functions, but it does not tell us their binding sites, selectivity or exact molecular interactions. The targets are different types of proteins, so we should not assume that they all act like conventional receptor agonists.
+
+## cmpd_7933: APBA3
+
+The target of cmpd_7933 is **APBA3**, also called Mint3, an adaptor protein that interacts with amyloid precursor protein (APP). Experimental work shows that Mint3 helps APP leave the Golgi, connecting it to protein trafficking within cells ([Mint3-dependent APP trafficking study](https://pubmed.ncbi.nlm.nih.gov/23965993/)).
+
+The dataset describes cmpd_7933 as an APBA3 agonist. Its **39.9% higher mean signal** makes APBA3-associated activity a candidate explanation to investigate, but the screen did not measure APP trafficking. The literature establishes a function of the target; it does not demonstrate that this compound protects MPP-exposed neurons through that function.
+
+## cmpd_4952: RIT2
+
+The target of cmpd_4952 is **RIT2**, a small GTPase involved in intracellular signalling ([NCBI RIT2](https://www.ncbi.nlm.nih.gov/gene/6014)). Research in cellular and animal models connects Rit2 with lysosomal function, LRRK2 activity and protection against alpha-synuclein pathology ([Rit2 neuroprotection study](https://pubmed.ncbi.nlm.nih.gov/36973269/)). This gives the target a specific connection to Parkinson's disease biology.
+
+The dataset labels cmpd_4952 as a RIT2 agonist, and its mean signal is **42.0% higher** than its control. This is consistent with a hypothesis that enhancing RIT2-associated function could support neuronal survival. However, the cited work studied Rit2 manipulation in different models, not this compound in this MPP assay. We therefore cannot infer that altered lysosomal function or LRRK2 activity caused our result.
+
+## cmpd_7429: LARGE1
+
+The target of cmpd_7429 is **LARGE1**, a glycosyltransferase with xylosyltransferase and glucuronyltransferase activities. These activities build repeating sugar units on alpha-dystroglycan, allowing it to bind extracellular matrix ligands ([Inamori and colleagues, 2012](https://pubmed.ncbi.nlm.nih.gov/22223806/)).
+
+The dataset labels cmpd_7429 as a LARGE1 agonist. Its **35.9% higher mean signal** suggests that LARGE1-associated activity is another candidate for follow-up. Enhanced glycosylation is a possible explanation based on the target's function, but neither glycosylation nor extracellular matrix binding was measured here, so this remains a hypothesis.
+
+## Answer to Question 3
+
+The annotated target-action pairs are **APBA3 agonism, RIT2 agonism and LARGE1 agonism**. Their established functions involve protein trafficking, intracellular signalling and glycosylation, respectively. RIT2 has particularly relevant experimental literature linking it to Parkinson's-related neuronal pathology, while the APBA3 and LARGE1 references explain target functions without establishing MPP protection. The viability results and these annotations together identify useful candidates for further study, but do not confirm a mechanism of protection. The internal compound identifiers also do not provide enough information to identify a recognised drug or its full pharmacology.
