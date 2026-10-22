@@ -1,0 +1,390 @@
+---
+title: "BIOL90042 Final Project: Clinical Trial"
+author: "Ratnpriya"
+format: 
+  html:
+    toc: true
+    embed-resources: true
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Clinical trial
+
+This section analyses the clinical trial data in `gait.Rda`.
+
+This is relevant to Parkinson's disease because gait and balance problems (an unsteady gait, poor balance and more frequent falls) are common motor symptoms, and a smartwatch gives us a way to measure them during everyday activities.
+
+The file contains one object:
+
+- `gait_data`: one row per participant (16 PD patients), with their `donorid`, `treatment` (L-DOPA or the new compound), `age`, `exercise` (y/n), and then 700 columns (`1_secs` to `700_secs`) giving the vertical orientation in degrees off-axis, measured once per second while walking
+
+A measurement of 0 means the patient is standing perfectly upright, so values further from 0 (in either direction) mean less balanced movement. The watches were not worn during the exercise routine itself, only during everyday activities.
+
+## Setup
+
+```{r}
+# Load the tidyverse packages (dplyr, tidyr, ggplot2 etc.)
+library(tidyverse)
+
+# Load the gait data (the file sits in the same folder as this document)
+load("gait.Rda")
+```
+
+```{r}
+# Inspect the data
+dim(gait_data) # rows and columns
+head(gait_data[, 1:8]) # only the first few columns, as there are 700 time columns
+```
+
+```{r}
+# Check how the participants are split across treatment and exercise
+gait_data %>%
+  count(treatment, exercise)
+```
+
+# Question 1
+
+## Plot each participants' gait data and describe it using descriptive statistics. Which of these descriptive statistics do you think is most useful for capturing the overall gait smoothness and balance of a participant?
+
+To plot each participant's gait, we need the data in long format, so that there is one row for each participant at each second. Since `gait_data` is stored in wide format, with each second as a separate column, we can reshape it using pivot_longer(). We select all of the time columns using ends_with("\_secs"), and then remove the "\_secs" text so that time is stored as a number.
+
+```{r}
+gait_long <- gait_data %>%
+  pivot_longer(
+    cols = ends_with("_secs"), # select all the time columns
+    names_to = "time", # the old column names go into a new column called time
+    values_to = "orientation" # the measurements go into a new column called orientation
+  ) %>%
+  mutate(
+    time = as.numeric(str_remove(time, "_secs")) #turn "1_secs" into the number 1
+  )
+
+head(gait_long)
+```
+
+Before plotting, we can check that each participant has 700 measurements and that there are no missing values.
+
+```{r}
+# Count the measurements and missing values for each participant
+gait_long %>%
+  summarise(
+    n_measurements = n(), # should be 700 for everyone
+    n_missing = sum(is.na(orientation)), # should be 0 for everyone
+    .by = donorid
+  )
+```
+
+Now we can plot each participant's orientation over time. Using facet_wrap() gives each participant their own panel, and the dashed line at 0 shows perfectly upright. We colour the lines by treatment, and sort the participants so that each treatment group sits together, which makes it easier to see whether the two groups look different.
+
+```{r}
+#| fig-width: 12
+#| fig-height: 8
+gait_long %>%
+  arrange(treatment, donorid) %>% #sort so that each treatment's donors are together
+  mutate(donorid = fct_inorder(donorid)) %>% #keep the panels in this sorted order
+  ggplot(aes(x = time, y = orientation, colour = treatment)) +
+  geom_line(linewidth = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") + #0 = perfectly upright
+  facet_wrap(~ donorid, nrow = 4, dir = "v") + #4 x 4 grid, filled down each column
+  labs(
+    x = "Time (seconds)",
+    y = "Vertical orientation (degrees off-axis)",
+    title = "Gait data for each participant",
+    subtitle = "Left two columns: L-DOPA control (red). Right two columns: New compound (teal).",
+    colour = "Treatment"
+  ) +
+  theme_minimal()
+```
+
+**Description of the plots:**
+
+Across all 16 participants, the vertical orientation fluctuates up and down around 0, which means each participant swayed both ways while walking, and none stayed perfectly upright. However, the size of these swings differs clearly between participants. Some participants, such as d270, d104 and d239, show wide, dense swings that reach roughly ±40 degrees or more, while others, such as d272 and d182, stay in a much narrower band close to 0. This suggests that gait smoothness and balance vary a lot between individuals.
+
+Participants receiving L-DOPA (red) generally appear to fluctuate more than those receiving the new compound (teal), but this is not a clean split, because some participants on the new compound (for example d104 and d239) also show large swings. As such, we cannot judge the treatment difference from the plots alone, and we need descriptive statistics to compare participants more precisely.
+
+Next, we calculate descriptive statistics for each participant. We group by donorid, and also keep treatment, age and exercise so that they stay attached to each participant for later questions. We use the mean, median, standard deviation, minimum and maximum, and we also add the mean of the absolute orientation, which ignores whether the participant was leaning forwards or backwards and only measures how far they were from upright.
+
+```{r}
+participant_gait <- gait_long %>%
+  summarise(
+    mean_orientation = mean(orientation), # average orientation
+    median_orientation = median(orientation), # middle value
+    sd_orientation = sd(orientation), # how spread out the swings are
+    min_orientation = min(orientation), # most extreme backward reading
+    max_orientation = max(orientation), # most extreme forward reading
+    mean_abs_orientation = mean(abs(orientation)), #average distance from upright
+    .by = c(donorid, treatment, age, exercise)
+  )
+
+# Print every column (width = Inf) so that none are hidden in the report
+print(participant_gait, width = Inf)
+```
+
+**Which descriptive statistic is most useful?**
+
+The mean and median orientation were close to 0 for every participant (roughly -0.9 to 0.8 degrees), because forward and backward swings cancel each other out. These statistics therefore do not capture how unsteady a participant's gait is. For example, d272 and d270 have similar means (-0.12 and -0.91) but very different standard deviations (2.35 and 17.26). The minimum and maximum only reflect single extreme measurements, so they are sensitive to one unusual reading. The standard deviation (and the mean absolute orientation, which gave a very similar ranking) captures how far a participant moves away from upright over the whole walk, so a larger value indicates a less smooth gait and poorer balance. We therefore use the standard deviation as our measure of gait for the rest of the analysis, giving one value per participant.
+
+```{r}
+# Create a gait_score column (the standard deviation of orientation)
+participant_gait <- participant_gait %>%
+  mutate(
+    gait_score = sd_orientation #larger value = less smooth gait / worse balance
+  )
+
+head(participant_gait)
+```
+
+# Question 2
+
+## Is there a statistically significant difference in gait between participants receiving L-DOPA and the new compound? Ensure that you check your assumptions.
+
+For this question we compare `gait_score` between the two treatment groups. Using one value per participant (rather than all 700 seconds) is important, because measurements from the same person are not independent of each other. Before choosing a test, we need to check the assumptions of a t-test: independence, normality within each group, and similar variance between groups.
+
+First, we can look at the two groups visually.
+
+```{r}
+# Boxplot of gait score for each treatment, with each participant shown as a dot
+participant_gait %>%
+  ggplot(aes(x = treatment, y = gait_score, fill = treatment)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) + # hide boxplot outliers, as the dots already show them
+  geom_jitter(width = 0.15, alpha = 0.6) + # spread the dots out sideways so they don't overlap
+  labs(
+    x = "Treatment",
+    y = "Gait score (SD of orientation, degrees)",
+    title = "Gait score for each treatment group",
+    fill = "Treatment"
+  ) +
+  theme_minimal()
+```
+
+The new compound group had a lower typical gait score (median around 7) than the L-DOPA control group (median around 10.5), suggesting a smoother gait on the new compound. The new compound group was also more variable, ranging from about 2 to 12, while most of the L-DOPA group was clustered between about 9 and 12, apart from one participant with a much higher score of around 17. There is some overlap between the groups, so we need a statistical test to judge whether the difference is meaningful.
+
+## Check independence
+
+Each participant contributes only one gait score, and they were randomly assigned to one treatment. We can check that each donor appears once.
+
+```{r}
+# Check that each donor appears only once
+participant_gait %>%
+  summarise(
+    n_participants = n(),
+    n_unique_donors = n_distinct(donorid)
+  )
+```
+
+The results show that there are 16 observations and 16 unique donor IDs, so each participant contributes only one gait score. This supports the absence of repeated measurements. However, unique IDs alone do not prove the participants are independent, so independence remains an assumption based on the trial design, in which participants were randomly assigned to treatments.
+
+## Check normality
+
+We use Q-Q plots and the Shapiro-Wilk test separately for each treatment group. Note that with only 8 participants per group, these checks have limited power, so we also rely on the plots.
+
+```{r}
+# Q-Q plots: points close to the line suggest the data are roughly normal
+participant_gait %>%
+  ggplot(aes(sample = gait_score)) +
+  stat_qq() + # the observed values
+  stat_qq_line() + # the line the points would follow if the data were perfectly normal
+  facet_wrap(~ treatment) + # one plot per treatment group
+  labs(
+    title = "Q-Q plots of gait score by treatment",
+    x = "Theoretical normal quantiles",
+    y = "Observed gait score"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Shapiro-Wilk test for each treatment group (p > 0.05 = no evidence against normality)
+participant_gait %>%
+  summarise(
+    shapiro_p = shapiro.test(gait_score)$p.value,
+    .by = treatment
+  )
+```
+
+## Check equal variance
+
+We can compare the spread of the two groups using the standard deviation of gait_score in each group, and an F-test for equal variances.
+
+```{r}
+# Mean and standard deviation of gait score in each treatment group
+participant_gait %>%
+  summarise(
+    n = n(),
+    mean_gait = mean(gait_score),
+    sd_gait = sd(gait_score),
+    .by = treatment
+  )
+```
+
+```{r}
+# F-test comparing the variances of the two groups (p > 0.05 = no evidence they differ)
+var.test(gait_score ~ treatment, data = participant_gait)
+```
+
+**Interpretation of the assumption checks:**
+
+The Q-Q plots show that most points follow the reference line in both groups, although one L-DOPA participant (d270) has a noticeably higher gait score than the rest. The Shapiro-Wilk p-values were 0.108 for the L-DOPA group and 0.558 for the new compound group. Both are above 0.05, so there is no strong evidence that either group departs from normality, although with only eight participants per group these tests have limited power. The standard deviations of the two groups were similar (2.91 for L-DOPA and 3.63 for the new compound), and the F-test did not detect a difference in variances (F = 0.64, p = 0.572). Overall, the assumptions appear reasonable, but because of the small sample and the high-scoring L-DOPA participant, we use Welch's t-test (which does not assume equal variances) and also run a Wilcoxon rank-sum test to check that the conclusion does not depend on the normality assumption.
+
+## Compare the treatment groups
+
+We use Welch's t-test, which does not assume equal variances, and a Wilcoxon rank-sum test as a check that does not assume normality. The null hypothesis is that there is no difference between the groups, and we use a two-sided test with a significance level of 0.05.
+
+```{r}
+# Welch's t-test: compares the mean gait score of the two treatment groups
+t.test(
+  gait_score ~ treatment,
+  data = participant_gait,
+  var.equal = FALSE # Welch's version, does not assume equal variances
+)
+```
+
+```{r}
+# Wilcoxon rank-sum test: rank-based check that does not assume normality
+wilcox.test(gait_score ~ treatment, data = participant_gait)
+```
+
+**Interpretation:**
+
+Participants on the new compound had a lower mean gait score (7.19) than those on L-DOPA (10.94), suggesting a smoother gait. Welch's t-test found this difference to be statistically significant (t = 2.28, df = 13.4, p = 0.039), with a 95% confidence interval for the difference of 0.21 to 7.30 degrees. However, the Wilcoxon rank-sum test, which does not assume normality, did not reach significance (W = 49, p = 0.083). The two tests therefore give slightly different conclusions, and the evidence for a treatment difference is borderline. This is likely partly due to the small sample size (eight participants per group), which limits statistical power, and the wide confidence interval shows considerable uncertainty about the size of the effect. A non-significant result would not show that the treatments are the same.
+
+# Question 3
+
+## Does either of age or the exercise regime affect gait? If so, take this into consideration when investigating the relationship between the treatment and gait.
+
+To see whether age or exercise affects gait, we look at each one against gait_score. For age (a continuous variable) we use a scatterplot and a correlation test. For exercise (two groups, y or n), we use a boxplot and a t-test. We also check the assumptions of each test.
+
+```{r}
+# Age vs gait score (the scatterplot also lets us check the relationship looks roughly linear)
+participant_gait %>%
+  ggplot(aes(x = age, y = gait_score, colour = treatment)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, aes(group = 1), colour = "black") + #overall trend line
+  labs(
+    x = "Age (years)",
+    y = "Gait score (SD of orientation, degrees)",
+    title = "Age and gait score",
+    colour = "Treatment"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Pearson correlation between age and gait score
+cor.test(participant_gait$age, participant_gait$gait_score)
+```
+
+The Pearson correlation assumes a roughly linear relationship (which the scatterplot supports) and approximately normal variables. We check the normality of age and gait score, and also run a Spearman correlation, which is rank-based and does not assume normality.
+
+```{r}
+# Shapiro-Wilk tests for age and for gait score (p > 0.05 = no evidence against normality)
+shapiro.test(participant_gait$age)
+shapiro.test(participant_gait$gait_score)
+```
+
+```{r}
+# Spearman correlation: rank-based check that does not assume normality
+cor.test(participant_gait$age, participant_gait$gait_score, method = "spearman")
+```
+
+```{r}
+# Exercise vs gait score
+participant_gait %>%
+  ggplot(aes(x = exercise, y = gait_score, fill = exercise)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.6) +
+  labs(
+    x = "Supervised exercise routine",
+    y = "Gait score (SD of orientation, degrees)",
+    title = "Exercise and gait score",
+    fill = "Exercise"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Welch's t-test: compares mean gait score between exercise (y) and no exercise (n)
+t.test(gait_score ~ exercise, data = participant_gait)
+```
+
+For the exercise comparison, we check normality and spread within each exercise group, and run a Wilcoxon rank-sum test as a check that does not assume normality.
+
+```{r}
+# Normality (Shapiro-Wilk) and spread (standard deviation) of gait score in each exercise group
+participant_gait %>%
+  summarise(
+    n = n(),
+    sd_gait = sd(gait_score),
+    shapiro_p = shapiro.test(gait_score)$p.value,
+    .by = exercise
+  )
+```
+
+```{r}
+# Wilcoxon rank-sum test: rank-based check for the exercise comparison
+wilcox.test(gait_score ~ exercise, data = participant_gait)
+```
+
+**Interpretation:**
+
+Age was positively correlated with gait score (r = 0.69, 95% CI 0.30 to 0.89, p = 0.003), meaning that older participants tended to have a less smooth gait and poorer balance. The scatterplot supports a roughly linear relationship. The Shapiro-Wilk test suggested that age departs somewhat from normality (p = 0.030), while gait score did not (p = 0.872), so we also ran a Spearman correlation, which gave the same conclusion (rho = 0.71, p = 0.002).
+
+Participants who did the supervised exercise routine also had a lower mean gait score (7.10) than those who did not (11.04), and this difference was statistically significant (Welch's t-test, p = 0.029; 95% CI for the difference 0.48 to 7.40). Gait scores within both exercise groups were consistent with normality (Shapiro-Wilk p = 0.614 for no exercise and 0.282 for exercise), the standard deviations were similar (3.27 and 3.18), and the Wilcoxon rank-sum test agreed with the t-test (W = 53, p = 0.028).
+
+Both age and exercise therefore appear to be related to gait, so they should be taken into account when comparing the treatments. With only 16 participants these estimates are imprecise, and each was tested separately, so they do not yet account for each other or for treatment.
+
+## Take age and exercise into account
+
+If age and/or exercise affect gait, then comparing treatments on their own could be misleading. A linear model lets us test the effect of treatment while adjusting for age and exercise at the same time. Because exercise was randomly assigned within each treatment group, the groups should be balanced, but with only 16 participants some imbalance in age is still possible. We can check this directly by comparing the age of participants across the groups.
+
+```{r}
+# Mean age in each treatment group, and in each exercise group
+participant_gait %>%
+  summarise(n = n(), mean_age = mean(age), sd_age = sd(age), .by = treatment)
+
+participant_gait %>%
+  summarise(n = n(), mean_age = mean(age), sd_age = sd(age), .by = exercise)
+```
+
+The mean age was similar across the treatment groups (about 73.0 years for L-DOPA and 71.4 years for the new compound) and across the exercise groups (about 72.9 years without exercise and 71.6 years with exercise), so age is not strongly confounded with either variable.
+
+```{r}
+# Linear model: gait score explained by treatment, age and exercise together
+gait_model <- lm(gait_score ~ treatment + age + exercise, data = participant_gait)
+
+summary(gait_model)
+```
+
+We can also compare this with the model that only includes treatment, to see how the treatment estimate changes after adjusting.
+
+```{r}
+# Linear model with treatment only, for comparison
+treatment_only_model <- lm(gait_score ~ treatment, data = participant_gait)
+
+summary(treatment_only_model)
+```
+
+Since this is a linear model, we also need to check its assumptions using the residuals (the differences between the observed and predicted values). The plots below show whether the residuals look roughly normal, have a similar spread, and whether any single participant has a large influence on the model.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 8
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1)) # show the 4 diagnostic plots together
+plot(gait_model)
+par(mfrow = c(1, 1)) # reset
+```
+
+```{r}
+# Shapiro-Wilk test on the model residuals (p > 0.05 = no evidence against normality)
+shapiro.test(residuals(gait_model))
+```
+
+**Interpretation & Final conclusion:**
+
+In the model including treatment, age and exercise, all three variables were significantly associated with gait score. After adjusting for age and exercise, participants on the new compound had a gait score 3.29 degrees lower than those on L-DOPA (p \< 0.001). Older age was associated with a higher gait score (0.30 degrees per year, p \< 0.001), and exercise was associated with a gait score 3.55 degrees lower (p \< 0.001). The treatment estimate was similar to the unadjusted estimate (-3.75, p = 0.039) but was much more precise, because age and exercise explained a large part of the variation in gait (R² = 0.92 compared with 0.27 for treatment alone). The residual plots showed no clear pattern or strong departures from the reference line, no participant had a large influence on the model, and the Shapiro-Wilk test on the residuals gave no evidence against normality (p = 0.971), so the model assumptions appear reasonable. Overall, the new compound was associated with a smoother gait than L-DOPA, and this was clearer after accounting for age and exercise. The unadjusted comparison was only borderline, since the t-test was significant (p = 0.039) but the Wilcoxon test was not (p = 0.083).
+
+Overall, this trial is small (16 participants), so the results should be interpreted cautiously. We did not test whether the effect of the treatment depends on exercise (an interaction), because 16 participants is too few to do this reliably. The analysis shows an association between these variables in this dataset, and larger trials would be needed to confirm whether the new compound improves gait compared with L-DOPA.
