@@ -1,0 +1,60 @@
+---
+title: "23.3.5 Bringing it together/linking between datasets"
+author: "Group 9"
+format:
+  html:
+    toc: true
+    embed-resources: true
+    number-sections: false
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Setup
+
+Load the tidyverse for the data preparation and plots used in this section.
+
+```{r}
+library(tidyverse)
+```
+
+# Question 1
+
+## Using their unique donor IDs, how many patients appear across all four arms of the study?
+
+```{r}
+
+```
+
+# Question 2
+
+## Do any variables other than gene expression distinguish the RNA-seq cases from controls?
+
+Hint: try colouring points on your MDS plot by other information you have about the donors, from the other datasets.
+
+```{r}
+
+```
+
+# Question 3
+
+## Are any of the gene targets of hit compounds from the drug screen differentially expressed in RNA-seq? Which GO terms are they associated with and what might this tell you about the pathology of PD?
+
+```{r}
+
+```
+
+# Question 4
+
+## Is there any relationship between the PRS and gait of patients in the clinical trial?
+
+```{r}
+
+```
+
+# Question 5
+
+## In a paragraph, summarise your findings and suggest directions for future research.
