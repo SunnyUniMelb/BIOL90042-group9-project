@@ -1,0 +1,337 @@
+---
+title: "Transcriptional Differences between Parkinson's Disease Cases and Healthy Controls"
+author: "Group 9"
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: false
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Introduction
+
+Parkinson's disease (PD) is a neurodegenerative disorder involving the progressive loss of dopaminergic neurons. The RNA-seq component of this project asks whether transcriptional profiles from patient-derived dopaminergic neurons differ between PD cases and healthy controls, and whether the differentially expressed genes point towards particular biological functions.
+
+The supplied dataset contains RNA-seq count data from 16 samples: eight PD cases and eight healthy controls. The analysis below addresses the following questions:
+
+1.  Which genes are differentially expressed between PD cases and healthy controls? Please also visualise your DE results with appropriate plot(s).
+2. Which gene ontology families do the DE genes belong to?
+3. Is the clustering of samples by gene expression consistent with their disease status as cases and controls?
+
+# Data and methods
+
+## Data import and sample information
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(edgeR)
+  library(limma)
+})
+
+load("rnaseq.Rda")
+load("rnaseq_gene_info.Rda")
+
+# The supplied RNA-seq object is a DGEList named dge.
+# The second file provides gene-name and GO annotations.
+stopifnot(inherits(dge, "DGEList"))
+
+sample_info <- dge$samples %>%
+  rownames_to_column("sample") %>%
+  mutate(group = factor(group, levels = c("control", "case")))
+
+sample_info %>%
+  count(group) %>%
+  knitr::kable()
+```
+
+The `DGEList` object preserves the relationship between the count matrix, sample metadata and gene identifiers. The dataset contains `r nrow(dge$counts)` genes before filtering and `r ncol(dge$counts)` samples.
+
+## Filtering and library normalisation
+
+Genes with very low expression provide little evidence for differential expression and can increase the multiple-testing burden. Therefore, use `filterByExpr()`, as recommended in Workshop 7. TMM normalisation was applied to account for differences in library size and RNA composition between samples.
+
+```{r preprocessing}
+dge <- normLibSizes(dge, method = "TMM")
+
+keep <- filterByExpr(dge, group = dge$samples$group)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+dge$samples$group <- factor(dge$samples$group,
+                            levels = c("control", "case"))
+
+preprocessing_summary <- tibble(
+  measure = c("Genes before filtering", "Genes retained", "Genes removed", "Samples"),
+  value = c(length(keep), sum(keep), sum(!keep), ncol(dge$counts))
+)
+preprocessing_summary %>% knitr::kable()
+
+normalisation_summary <- dge$samples %>%
+  rownames_to_column("sample") %>%
+  select(sample, group, donorid, lib.size, norm.factors)
+normalisation_summary %>% knitr::kable(digits = 4)
+```
+
+After filtering, `r nrow(dge$counts)` genes remained for statistical modelling. The normalisation factors are estimated from the supplied counts and were not manually adjusted.
+
+## Design and differential-expression model
+
+The experimental factor is disease status. I used a no-intercept design so that the model contains one coefficient for each group. The contrast `case - control` directly estimates the difference between the two group means.
+
+```{r model}
+design <- model.matrix(~ 0 + group, data = dge$samples)
+colnames(design) <- levels(dge$samples$group)
+
+design
+```
+
+```{r limma_voom}
+contrast_matrix <- makeContrasts(
+  case_vs_control = case - control,
+  levels = design
+)
+
+v <- voom(dge, design, plot = TRUE)
+fit <- lmFit(v, design)
+fit <- contrasts.fit(fit, contrasts = contrast_matrix)
+fit <- eBayes(fit)
+```
+
+`voom()` converts the counts to log-CPM values and models the mean--variance relationship. Its precision weights allow observations with greater expected variability to contribute less to the linear model. The moderated statistics from `eBayes()` borrow information across genes, which stabilises variance estimates when the number of biological replicates is limited.
+
+Differential expression was assessed using Benjamini--Hochberg adjusted p values. Genes with `adj.P.Val < 0.05` were classified as significant.
+
+```{r de-results}
+results <- topTable(
+  fit,
+  coef = "case_vs_control",
+  number = Inf,
+  sort.by = "P"
+) %>%
+  mutate(entrezid = as.integer(rownames(.))) %>%
+  left_join(
+    entrez_genename_key %>% select(entrezid, gene_name),
+    by = "entrezid"
+  ) %>%
+  mutate(
+    direction = case_when(
+      adj.P.Val < 0.05 & logFC > 0 ~ "Up in cases",
+      adj.P.Val < 0.05 & logFC < 0 ~ "Down in cases",
+      TRUE ~ "Not significant"
+    )
+  )
+
+de_genes <- results %>%
+  filter(adj.P.Val < 0.05)
+
+decisions <- decideTests(fit)
+decision_summary <- summary(decisions)
+decision_summary
+```
+
+```{r de-table}
+de_genes %>%
+  select(entrezid, gene_name, logFC, AveExpr, P.Value, adj.P.Val, B) %>%
+  knitr::kable(digits = 4)
+```
+
+The analysis identified `r nrow(de_genes)` significant genes: `r sum(de_genes$logFC > 0)` were up-regulated in cases and `r sum(de_genes$logFC < 0)` were down-regulated in cases. The strongest positive changes included **VPS18** (logFC = 4.20, adjusted P = 6.86 × 10^-8), **RNF166** (logFC = 3.68) and **ULK3** (logFC = 2.91). The strongest negative changes included **RPS6KA1** (logFC = -6.42), **LRP6** (logFC = -3.95) and **RIT2** (logFC = -3.34). The complete ranked results are retained in the `results` object, while the table above displays all genes passing the adjusted p-value threshold.
+
+# Results
+
+## Sample-level expression structure
+
+An MDS plot was used to visualise distances between samples based on their overall expression profiles. This is the sample-level diagnostic introduced in Workshop 7.
+
+```{r mds-plot, fig.width=7, fig.height=5}
+mds <- plotMDS(dge, plot = FALSE)
+
+mds_data <- tibble(
+  sample = colnames(dge),
+  donorid = dge$samples$donorid,
+  group = dge$samples$group,
+  MDS1 = mds$x,
+  MDS2 = mds$y
+)
+
+ggplot(mds_data, aes(MDS1, MDS2, colour = group, label = sample)) +
+  geom_point(size = 3) +
+  geom_text(vjust = -0.7, show.legend = FALSE, check_overlap = TRUE) +
+  scale_colour_manual(values = c(control = "#2166AC", case = "#B2182B")) +
+  theme_classic() +
+  labs(
+    title = "MDS plot of RNA-seq samples",
+    x = "MDS dimension 1",
+    y = "MDS dimension 2",
+    colour = "Disease status"
+  )
+```
+
+The MDS plot shows a strong but incomplete separation of the two disease-status groups. Control samples 1 and 3--8 have negative MDS1 scores, whereas case samples 1--5 have positive MDS1 scores. Case samples 6--8 lie on the negative side and are closer to the control cluster, so the separation is not perfect. This overall pattern is consistent with the formal DE results, including case-up genes such as **VPS18** and **MFN2** and case-down genes such as **RIT2** and **LRP6**, although MDS is based on the combined expression of all retained genes rather than on any single gene. Disease status therefore explains an important component of the expression structure, but it is not the only source of variation. The less clearly separated samples should not be removed solely on the basis of this plot; their metadata and quality information would need to be investigated first.
+
+## MA plot
+
+The MA plot displays the average expression of each gene against its estimated log2 fold-change. Significant genes are highlighted according to the adjusted p-value threshold.
+
+```{r ma-plot, fig.width=7, fig.height=5}
+plot_data <- results
+n_label_genes <- min(10, sum(plot_data$adj.P.Val < 0.05))
+label_data <- plot_data %>%
+  filter(adj.P.Val < 0.05) %>%
+  slice_min(adj.P.Val, n = n_label_genes)
+
+ggplot(plot_data, aes(x = AveExpr, y = logFC, colour = direction)) +
+  geom_point(size = 1.4, alpha = 0.75) +
+  geom_text(
+    data = label_data,
+    aes(label = gene_name),
+    colour = "black",
+    vjust = -0.7,
+    check_overlap = TRUE,
+    show.legend = FALSE
+  ) +
+  scale_colour_manual(values = c(
+    "Not significant" = "grey70",
+    "Down in cases" = "#2166AC",
+    "Up in cases" = "#B2182B"
+  )) +
+  theme_classic() +
+  labs(
+    title = "MA plot: PD cases versus healthy controls",
+    x = "Average log2 expression",
+    y = "log2 fold-change (case - control)",
+    colour = "Result"
+  )
+```
+
+The MA plot shows significant genes on both sides of zero, indicating both increased and decreased expression in cases. For example, **VPS18** is strongly above zero (logFC = 4.20), whereas **RPS6KA1** (logFC = -6.42) and **LRP6** (logFC = -3.95) are below zero. The spread of fold-change estimates is generally greater at lower average expression, which is expected because lowly expressed genes contain less information. This is one reason why filtering and the precision weighting in `voom()` are important.
+
+## Volcano plot
+
+The volcano plot shows the magnitude and direction of the expression difference together with the statistical evidence for each gene.
+
+```{r volcano-plot, fig.width=7, fig.height=5}
+ggplot(plot_data, aes(x = logFC, y = -log10(P.Value), colour = direction)) +
+  geom_point(size = 1.4, alpha = 0.75) +
+  geom_text(
+    data = label_data,
+    aes(label = gene_name),
+    colour = "black",
+    vjust = -0.7,
+    check_overlap = TRUE,
+    show.legend = FALSE
+  ) +
+  scale_colour_manual(values = c(
+    "Not significant" = "grey70",
+    "Down in cases" = "#2166AC",
+    "Up in cases" = "#B2182B"
+  )) +
+  theme_classic() +
+  labs(
+    title = "Volcano plot: PD cases versus healthy controls",
+    x = "log2 fold-change (case - control)",
+    y = "-log10(raw P value)",
+    colour = "Result"
+  )
+```
+
+The most convincing candidates combine a substantial absolute log fold-change with strong evidence after multiple-testing correction. In this dataset, **VPS18**, **ULK3**, **MFN2** and **RIT2** are among the most statistically significant genes, while **RPS6KA1** has the largest absolute logFC despite a less extreme adjusted P value. A large fold-change alone is not sufficient: a noisy estimate can have a large apparent effect but remain non-significant after correction.
+
+## Heatmap of significant genes
+
+To examine whether the significant genes produce a coherent sample-level pattern, I plotted the most significant genes using log-CPM expression values. Each row was standardised so that the heatmap emphasises relative expression patterns across samples.
+
+```{r heatmap, fig.width=9, fig.height=7}
+n_heatmap_genes <- min(30, sum(results$adj.P.Val < 0.05))
+top_heatmap_genes <- results %>%
+  filter(adj.P.Val < 0.05) %>%
+  slice_min(adj.P.Val, n = n_heatmap_genes) %>%
+  distinct(entrezid, gene_name)
+
+log_cpm <- cpm(dge, log = TRUE, prior.count = 2)
+heatmap_matrix <- log_cpm[as.character(top_heatmap_genes$entrezid), , drop = FALSE]
+rownames(heatmap_matrix) <- top_heatmap_genes$gene_name
+
+heatmap_z <- t(scale(t(heatmap_matrix)))
+heatmap_data <- as.data.frame(heatmap_z) %>%
+  rownames_to_column("gene_name") %>%
+  pivot_longer(-gene_name, names_to = "sample", values_to = "z_score") %>%
+  left_join(mds_data %>% select(sample, group), by = "sample")
+
+ggplot(heatmap_data, aes(x = sample, y = gene_name, fill = z_score)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    low = "#2166AC", mid = "white", high = "#B2182B",
+    midpoint = 0
+  ) +
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 7)
+  ) +
+  labs(
+    title = "Relative expression of the most significant DE genes",
+    x = "Sample",
+    y = "Gene",
+    fill = "Row z-score"
+  )
+```
+
+The heatmap provides a complementary view of the DE analysis. The rows for case-up genes such as **VPS18**, **MFN2**, **ATG7** and **UVRAG** should tend toward higher relative expression in cases, whereas rows for case-down genes such as **RIT2**, **LRP6**, **MAPK1** and **RPS6KA1** should tend toward lower relative expression. This gene-level pattern supports the interpretation that the DE list is biologically structured rather than being a collection of indistinguishable hits. The MDS plot and heatmap should be interpreted together, because neither plot replaces the formal statistical test.
+
+# Functional interpretation
+
+## GO categories represented among DE genes
+
+The supplied `gene_ontology` table was joined to the significant genes using Entrez IDs. I report the GO families represented among the DE genes and the number of DE genes in each family. Because the supplied annotation table contains only a small set of annotated genes and categories, these counts are interpreted descriptively rather than as a broad pathway-enrichment analysis.
+
+```{r go-analysis}
+filtered_gene_ids <- as.integer(dge$genes$genes)
+
+go_background <- gene_ontology %>%
+  filter(entrezgene_id %in% filtered_gene_ids) %>%
+  distinct(entrezgene_id, desc)
+
+go_de <- go_background %>%
+  filter(entrezgene_id %in% de_genes$entrezid)
+
+go_summary <- go_de %>%
+  distinct(desc, entrezgene_id) %>%
+  count(desc, name = "DE_genes", sort = TRUE)
+
+go_summary %>% knitr::kable()
+```
+
+```{r go-plot, fig.width=7, fig.height=4}
+go_plot_data <- go_summary %>%
+  mutate(category = forcats::fct_reorder(desc, DE_genes))
+
+ggplot(go_plot_data, aes(x = category, y = DE_genes)) +
+  geom_col(fill = "#4D9221") +
+  coord_flip() +
+  theme_classic() +
+  labs(
+    title = "GO categories represented among DE genes",
+    x = "GO category",
+    y = "Number of DE genes"
+  )
+```
+
+The supplied annotations associate 13 DE genes with **Autophagy** (**ATG7, DNM2, IRGM, MFN2, PRKAA1, RAB1A, RAB1B, RNF166, ULK3, UVRAG, VPS18, VPS4A** and **VPS4B**) and 6 DE genes with **Synaptic transmission** (**APBA3, LARGE1, LRP6, MAPK1, RIT2** and **RPS6KA1**). These categories provide functional context for the transcriptional differences, but they should not be interpreted as proof that a pathway is enriched in PD. A larger annotation background and an independent enrichment analysis would be needed for that conclusion.
+
+# Discussion
+
+The RNA-seq analysis identified a set of genes whose expression differed between the PD cases and healthy controls after filtering, TMM normalisation and limma-voom modelling. The signs of the log fold-changes indicate the direction of the difference, while the adjusted p values account for the large number of genes tested.
+
+The sample-level MDS plot suggests that disease status is associated with a major component of the expression variation, although the two groups are not perfectly separated. This partial separation is important: it supports a disease-related transcriptional signal but also indicates that other sources of variation may be present. In a larger or better-documented experiment, sample quality metrics, batch variables, age, sex and other donor-level covariates should be assessed and incorporated into the design if appropriate.
+
+The MA plot, volcano plot and heatmap show complementary aspects of the same analysis. The MA plot describes how fold-change varies with expression level, the volcano plot highlights the trade-off between effect size and statistical evidence, and the heatmap shows whether the strongest genes produce a coherent sample pattern. Together with the GO analysis, these results suggest that the significant genes are not merely a list of isolated statistical hits, but are associated with annotated biological functions in the supplied data.
+
+Several limitations should be considered. First, the data are from a simulated teaching dataset and the analysis is observational. Second, the supplied RNA-seq object does not include additional covariates beyond disease group, so potential confounding cannot be fully assessed here. Third, GO interpretation depends on the supplied annotation and background gene universe. Finally, differential expression does not demonstrate that a gene causes PD; candidate genes and functional categories would require validation in independent samples and experimental systems.
+
+# Conclusion
+
+Using the Workshop 7 RNA-seq workflow, I filtered lowly expressed genes, normalised the libraries with TMM, fitted a limma-voom model and controlled the false discovery rate with the Benjamini--Hochberg procedure. The resulting DE genes were visualised with an MDS plot, MA plot, volcano plot and heatmap, and were linked to the supplied GO annotations. The combined analysis supports transcriptional differences between the PD cases and controls, while the incomplete sample separation and the limitations of the supplied annotation indicate that the results should be interpreted as candidate disease-associated signals rather than definitive mechanisms.
