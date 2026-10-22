@@ -25,9 +25,55 @@ library(tidyverse)
 
 ## Using their unique donor IDs, how many patients appear across all four arms of the study?
 
-```{r}
+To work out how many patients appear across the datasets, we need to match them using donorid. We can first use select() and distinct() to keep one row per donor in each dataframe. Since these dataframes already use the same donorid column, we do not need to rename it. We can also use mutate() to add a column showing which dataset each donor appears in. This will help us check the matches after joining them together.
 
+```{r}
+load("../data/prs.Rda")
+load("../data/gait.Rda")
+load("../data/rnaseq.Rda")
+load("../data/rnaseq_gene_info.Rda")
+load("../data/drugscreen.Rda")
+
+genetics_donors <- ca_co_genotypes %>%
+  select(donorid) %>%
+  distinct() %>%
+  mutate(in_genetics = TRUE)
+
+rnaseq_donors <- dge$samples %>%
+  select(donorid) %>%
+  distinct() %>%
+  mutate(in_rnaseq = TRUE)
+
+gait_donors <- gait_data %>%
+  select(donorid) %>%
+  distinct() %>%
+  mutate(in_gait = TRUE)
 ```
+
+Now that the dataframes have the same donorid column, we can use left_join() to add the RNA-seq and clinical trial information to genetics_donors. This works in the same way as joining the genotype and GWAS data in the population genetics analysis. However, left_join() keeps all donors from the first dataframe, including those without a match. For donors who do not appear in RNA-seq or the clinical trial, the corresponding new column will contain NA.
+
+```{r}
+donor_data <- genetics_donors %>%
+  left_join(rnaseq_donors, by = "donorid") %>%
+  left_join(gait_donors, by = "donorid")
+
+head(donor_data)
+```
+
+Looking at donor_data, each donor now has columns showing which datasets they appear in. We only want the patients who appear in all three, so we can use filter() to keep the rows where all three columns are TRUE. As such, the unmatched donors are removed before we count the remaining rows.
+
+```{r}
+shared_donors <- donor_data %>%
+  filter(in_genetics == TRUE, in_rnaseq == TRUE, in_gait == TRUE) %>%
+  select(donorid)
+
+shared_donors
+nrow(shared_donors) #number of patients shared between these datasets
+```
+
+Looking at the joined dataframe, there are **8 patients** who appear in all three donor-linked datasets: d001, d104, d172, d182, d202, d239, d270 and d272.
+
+However, the drug screen is slightly different. The ebook explains that it uses neurons from one healthy donor, and the supplied drug-screening data contains compound IDs and well positions rather than donor IDs. As such, we can confirm that 8 patients appear across population genetics, RNA-seq and the clinical trial, but we cannot match the drug-screen donor to them or confirm a count across all four arms from these files.
 
 # Question 2
 
@@ -43,9 +89,94 @@ Hint: try colouring points on your MDS plot by other information you have about 
 
 ## Are any of the gene targets of hit compounds from the drug screen differentially expressed in RNA-seq? Which GO terms are they associated with and what might this tell you about the pathology of PD?
 
-```{r}
+For question three, we can carry on from the compounds identified in the drug-screening analysis. Using the one-sided Welch tests with correction across all 192 compounds, the three hits were cmpd_7933, cmpd_4952 and cmpd_7429. These increased mean luminescence by approximately 39.9%, 42.0% and 35.9%, respectively, compared with their inactive controls. This follows the main analysis in our drug-screening report; the Wilcoxon sensitivity check did not retain significance after correction, so we should treat these as candidate hits for further investigation. To see whether their targets are also differentially expressed, we first need to find the genes that these compounds act on.
 
+```{r}
+# These are the three significant hits from our drug-screening analysis.
+hit_compounds <- compound_dict %>%
+  filter(id %in% c("cmpd_7933", "cmpd_4952", "cmpd_7429"))
+
+hit_compounds
 ```
+
+Looking at compound_dict, these compounds target APBA3, RIT2 and LARGE1, respectively, and all three are agonists. The target_enzyme column contains the Entrez gene IDs, which means we can use it to connect the compounds to the RNA-seq results.
+
+Before joining these together, we need the differential expression results for cases compared with controls. We can follow the steps from Workshop 7, using normLibSizes() for TMM normalisation and filterByExpr() to remove genes with low expression. Here we keep the same order as our RNA-seq report, which retained 9,890 genes for the comparison.
+
+```{r}
+library(edgeR)
+library(limma)
+
+# Start from the supplied counts and follow the RNA-seq report.
+load("../data/rnaseq.Rda")
+dge <- normLibSizes(dge, method = "TMM")
+keep <- filterByExpr(dge, group = dge$samples$group)
+dge_filtered <- dge[keep, , keep.lib.sizes = FALSE]
+dge_filtered$samples$group <- factor(
+  dge_filtered$samples$group, levels = c("control", "case")
+)
+```
+
+Now we can set up the design matrix based on the group column in dge_filtered\$samples. Following the workshop, we use \~ 0 + group and then make a contrast for case minus control. This means a positive logFC shows higher expression in cases, while a negative logFC shows lower expression in cases.
+
+```{r}
+design <- model.matrix(~ 0 + group, data = dge_filtered$samples)
+colnames(design) <- levels(dge_filtered$samples$group)
+design
+
+contrast_matrix <- makeContrasts(
+  case_vs_control = case - control,
+  levels = design
+)
+contrast_matrix
+```
+
+Since RNA-seq counts do not have the same spread at every expression level, we use voom() before fitting the linear model. We can then use lmFit(), contrasts.fit() and eBayes(), as in the workshop, to compare cases with controls. Finally, topTable() gives us the results for all tested genes, including their adjusted p-values.
+
+```{r}
+v <- voom(dge_filtered, design, plot = TRUE)
+fit <- lmFit(v, design)
+fit <- contrasts.fit(fit, contrasts = contrast_matrix)
+fit <- eBayes(fit)
+
+results <- topTable(fit, coef = "case_vs_control", number = Inf)
+head(results)
+```
+
+The genes column in results contains the Entrez IDs. We can rename this column to target_enzyme so that it matches compound_dict, and use left_join() to add the RNA-seq results to our three hit compounds. The adjusted p-values were calculated across all tested genes, before selecting these three targets.
+
+```{r}
+rna_results <- results %>%
+  as_tibble() %>%
+  rename(target_enzyme = genes)
+
+hit_expression <- hit_compounds %>%
+  left_join(rna_results, by = "target_enzyme") %>%
+  select(id, hgnc_symbol, target_enzyme, action, logFC, P.Value, adj.P.Val)
+
+hit_expression
+```
+
+Looking at the joined results, **all three targets are significantly differentially expressed**, since their adjusted p-values are below 0.05. RIT2 has a logFC of approximately -3.341 and an adjusted p-value of 1.06e-06, APBA3 has a logFC of -2.207 and an adjusted p-value of 7.30e-05, and LARGE1 has a logFC of -1.580 and an adjusted p-value of 0.0129. Since all three logFC values are negative, their expression is lower in PD cases compared with controls.
+
+Now that we have identified the differentially expressed targets, we can use the gene_ontology dataframe to see which biological functions they are associated with. This dataframe uses entrezgene_id for its gene IDs, so we need to match target_enzyme to this column when joining.
+
+```{r}
+hit_go <- hit_expression %>%
+  filter(adj.P.Val < 0.05) %>%
+  left_join(gene_ontology,
+            by = c("target_enzyme" = "entrezgene_id")) %>%
+  select(hgnc_symbol, go_id, desc) %>%
+  distinct()
+
+hit_go
+```
+
+Looking at the GO results, APBA3, RIT2 and LARGE1 are all associated with **GO:0007268, synaptic transmission**. This is consistent with our RNA-seq report, where six of the 19 significant genes were associated with synaptic transmission and the other 13 with autophagy. Our three drug-hit targets belong to the synaptic transmission group. Since synaptic transmission is how neurons pass signals to one another, this suggests that changes in neuronal communication may be relevant to PD in this dataset. Their expression is lower in cases, while the compounds annotated as agonists of these targets increased the viability-associated luminescence signal after MPP exposure. Taken together, the two analyses point towards these targets as possible links between altered gene expression and neuronal survival. As such, increasing the activity of these targets may be worth investigating further.
+
+However, lower gene expression does not automatically mean lower protein activity, and the drug screen used technical replicates from one healthy donor. We would therefore need further experiments to check whether these compounds act through the proposed targets and whether the same effect occurs in neurons from PD patients. These GO results show the annotations of our three targets; they do not test whether synaptic transmission is statistically enriched.
+
+The RNA-seq steps follow [Workshop 7](https://wehi-education.github.io/BIOL90042_R_Course/workshop_7.html), and the experimental context follows [Tutorial 9](https://wehi-education.github.io/BIOL90042_R_Course/tutorial_9.html) of the WEHI course ebook.
 
 # Question 4
 
