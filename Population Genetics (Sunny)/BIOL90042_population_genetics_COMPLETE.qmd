@@ -16,6 +16,8 @@ execute:
 
 This section analyses the population genetics data in `prs.Rda`.
 
+This is relevant to Parkinson’s disease because genetic susceptibility can be spread across many loci, rather than explained by one variant alone. For example, [Nalls and colleagues (2019)](https://pubmed.ncbi.nlm.nih.gov/31701892/) identified 90 independent PD-associated signals across 78 genomic regions. Our score only includes 15 loci, so it captures a selected part of this genetic susceptibility, rather than all inherited risk. The published study provides context for the approach; it is not evidence that these particular 15 loci reproduce its predictive performance.
+
 The file contains two objects:
 
 - `ca_co_genotypes`: participant genotype dosage data
@@ -23,9 +25,11 @@ The file contains two objects:
 
 For each participant, the PRS is calculated as:
 
-\[ PRS = \sum (\text{dosage} \times \beta) \]
+PRS = sum of (dosage x beta) across all 15 loci.
 
 where `dosage` is the number of copies of the risk allele at a locus and `beta` is the effect size from the GWAS.
+
+For this calculation to have the intended meaning, the allele counted by the dosage must be the same allele to which the GWAS beta refers. A locus with a larger positive beta contributes more per copy than one with a smaller beta. As such, PRS combines both the number of risk alleles and their weights, rather than simply counting variants. The resulting value is a score on this particular scale, not a percentage probability of developing PD.
 
 ## Setup
 
@@ -132,6 +136,8 @@ participant_prs %>%
 
 ### d210 (case status) has 0.31 PRS
 
+Both the highest and lowest scores belong to cases. This is useful in answering Question 1 because it shows that being a case does not require a high score at these 15 loci. In particular, d210’s low PRS does not contradict their PD status: the score leaves out other genetic contributions and non-genetic influences. These extremes describe individuals in this dataset, rather than clinical thresholds for high or low disease risk.
+
 # Question 2
 
 ## Plot and describe the distribution of PRS for cases and controls. Include appropriate descriptive statistics.
@@ -158,6 +164,8 @@ prs_summary
 ## Visualise the distributions
 
 Now we can see that there are 150 participants in each group. Cases had a higher mean PRS of 1.207 compared with 1.008 for controls. The standard deviation was also slightly higher for cases, at 0.395 compared with 0.332, suggesting that their scores were somewhat more spread out.
+
+The mean difference is approximately **0.199 PRS units**. In the context of PD, this suggests that cases carry a greater weighted contribution from the risk alleles included in the score, on average. However, 0.199 PRS units cannot be interpreted as a 19.9% increase in disease risk. Also, the equal case and control sample sizes describe how this dataset is composed; they do not imply that half of the wider population develops PD.
 
 Since we now have the groups clearly separated, and boxplots can effectively visualise two categorical groups while also showing spread, median, and overall distribution, we can go ahead and visualise the distribution of PRS in PD cases and controls. This would be based on status on the x-axis and PRS on the y-axis.
 
@@ -197,6 +205,8 @@ participant_prs %>%
 Looking at the density plot, the case group appears to have higher PRS values overall compared with controls. The case curve peaks around \~1.3, while the control curve peaks closer to 1.0-1.1.
 
 Both distributions have one main peak, although neither is perfectly symmetrical. The case group appears slightly more spread out and extends further towards higher PRS values. This also matches the standard deviations, which were 0.395 for cases and 0.332 for controls. Overall, cases tend to have higher PRS values, but there is still substantial overlap between the two groups, meaning that many cases and controls have similar scores.
+
+This overlap matters for the overall question: a score can distinguish group averages while still being insufficient to identify an individual’s disease status. The density plot therefore supports a group association, but does not establish a diagnostic cut-off or predictive accuracy. We would need a separate assessment of prediction in independent data before making that claim.
 
 # Question 3
 
@@ -270,6 +280,8 @@ t.test(
 
 The p-value (3.783e-06) is much smaller than 0.05, suggesting that there is a statistically significant difference in mean PRS between cases and controls. Cases had a higher mean PRS of 1.207 compared with 1.008 for controls. This is consistent with what we saw in the plots, where cases generally had higher PRS values, although there was still substantial overlap between the two groups.
 
+This answers Question 3 as a comparison of means: the observed difference of around 0.199 PRS units provides evidence against equal population means under the test assumptions. The small p-value does not tell us how useful the score would be clinically, or the probability that genetic risk caused PD in a particular participant. With 150 participants per group and only modest departures in the Q-Q plots, comparing means using Welch’s test is reasonable here; the rank-based check below addresses whether the evidence depends strongly on that choice.
+
 ## Further rationale
 
 Although Welch’s t-test showed a significant difference in mean PRS between cases and controls, the control group showed some deviation from normality. As such, we can also use a Wilcoxon rank-sum test to check whether there is still evidence of a difference without assuming normally distributed values. A higher PRS means a greater combined contribution from the PD-associated risk alleles included in the score. If cases tend to have higher scores, this would support an association between these genetic risk factors and PD status in this dataset.
@@ -294,3 +306,17 @@ The Wilcoxon rank-sum test gave a p-value below 0.001 (W = 14710), which is much
 Since PRS combines risk-allele dosages with their corresponding GWAS effect sizes, higher scores in cases suggest a greater combined contribution from the PD-associated risk alleles included in this score. This supports an association between the genetic risk captured by the 15-locus PRS and PD status in this dataset. However, it does not mean that every case has a higher score than every control, or that PRS alone can determine whether someone has PD.
 
 The Wilcoxon result also agrees with the evidence of a group difference from Welch’s t-test, meaning this conclusion is supported without assuming normally distributed PRS values. However, because the groups differ somewhat in shape and spread, we cannot attribute the significant Wilcoxon result specifically to a difference in medians. We therefore interpret it alongside the plots and summary statistics as evidence that cases tend to have higher PRS values overall.
+
+Relating this back to the disease, the direction is consistent with the contribution of common genetic susceptibility to PD described by [Nalls and colleagues (2019)](https://pubmed.ncbi.nlm.nih.gov/31701892/). However, our analysis has not adjusted for ancestry, relatedness, age or sex, and has not established whether the participants were independent of the GWAS used to obtain the weights. Population differences or overlap with the discovery data could affect how we interpret the association. [Martin and colleagues (2019)](https://pubmed.ncbi.nlm.nih.gov/30926966/) also showed that polygenic prediction can perform differently across ancestry groups, so this score’s performance should not be assumed to transfer to other populations. As such, the result supports an association in this dataset, while independent validation and assessment of these factors would be needed before applying the score to individual PD risk.
+
+# References
+
+Martin, A. R., Kanai, M., Kamatani, Y., Okada, Y., Neale, B. M., & Daly, M. J. (2019). Clinical use of current polygenic risk scores may exacerbate health disparities. *Nature Genetics, 51*(4), 584–591. <https://doi.org/10.1038/s41588-019-0379-x>
+
+Nalls, M. A., et al. (2019). Identification of novel risk loci, causal insights, and heritable risk for Parkinson's disease: a meta-analysis of genome-wide association studies. *The Lancet Neurology, 18*(12), 1091–1102. <https://doi.org/10.1016/S1474-4422(19)30320-5>
+
+Zeglinski, K., & Argyropoulos, D. (2026). *BIOL90042 ebook 2026*. WEHI Education. [Course notebook](https://wehi-education.github.io/BIOL90042_R_Course/), including [Workshop 3: Data-wrangling](https://wehi-education.github.io/BIOL90042_R_Course/workshop_3.html), [Workshop 4: Plotting with ggplot2](https://wehi-education.github.io/BIOL90042_R_Course/workshop_4.html), [Workshop 6: Statistics in R](https://wehi-education.github.io/BIOL90042_R_Course/workshop_6.html), and [Tutorial 9: Final project](https://wehi-education.github.io/BIOL90042_R_Course/tutorial_9.html).
+
+# Acknowledgement of AI use
+
+I used OpenAI's ChatGPT/Codex to help refine code, improve sentence structure and clarity, and develop the explanation linking the results to the disease context. AI also assisted with locating relevant literature and suggesting additions to the interpretation. I carried out the analysis using code provided in the WEHI course notebook, with modifications for this dataset. I remain responsible for checking the code, results, interpretations and cited sources. The underlying course materials, dataset and published research are acknowledged separately above.
