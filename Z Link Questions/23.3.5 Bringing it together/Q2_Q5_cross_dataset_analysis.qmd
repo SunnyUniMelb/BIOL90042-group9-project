@@ -1,0 +1,168 @@
+---
+title: "Cross-dataset analysis: RNA-seq cases and controls"
+author: "Group 9"
+format:
+  html:
+    toc: true
+    number-sections: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Question 2
+
+## Do any variables other than gene expression distinguish the RNA-seq cases from controls?
+
+The RNA-seq sample metadata were linked to the population-genetics dataset using the unique `donorid`. The 15-locus polygenic risk score (PRS) was calculated as the sum of genotype dosage multiplied by the corresponding GWAS beta value. The RNA-seq MDS plot was then coloured by PRS to assess whether genetic risk followed a pattern similar to the expression-based separation.
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(edgeR)
+  library(limma)
+})
+
+load("rnaseq.Rda")
+load("prs.Rda")
+load("gait.Rda")
+
+stopifnot(inherits(dge, "DGEList"))
+```
+
+```{r prs-calculation}
+# Calculate one PRS for each participant from the 15 genotype loci.
+locus_columns <- setdiff(names(ca_co_genotypes), c("donorid", "status"))
+beta_lookup <- gwas_top_hits %>%
+  select(locus, beta)
+
+prs_long <- ca_co_genotypes %>%
+  pivot_longer(
+    cols = all_of(locus_columns),
+    names_to = "locus",
+    values_to = "dosage"
+  ) %>%
+  left_join(beta_lookup, by = "locus") %>%
+  mutate(locus_score = dosage * beta)
+
+participant_prs <- prs_long %>%
+  summarise(
+    PRS = sum(locus_score),
+    status = first(status),
+    .by = donorid
+  )
+
+# Confirm that all 15 loci were matched to a beta value.
+prs_long %>%
+  summarise(
+    donors = n_distinct(donorid),
+    loci = n_distinct(locus),
+    missing_beta = sum(is.na(beta))
+  ) %>%
+  knitr::kable()
+```
+
+```{r sample-linking}
+sample_info <- dge$samples %>%
+  rownames_to_column("sample") %>%
+  mutate(group = factor(group, levels = c("control", "case")))
+
+rna_prs <- sample_info %>%
+  select(sample, donorid, group) %>%
+  left_join(participant_prs %>% select(donorid, PRS), by = "donorid")
+
+prs_summary <- rna_prs %>%
+  summarise(
+    n = n(),
+    mean_PRS = mean(PRS),
+    median_PRS = median(PRS),
+    sd_PRS = sd(PRS),
+    minimum = min(PRS),
+    maximum = max(PRS),
+    .by = group
+  )
+
+prs_summary %>%
+  knitr::kable(digits = 3)
+```
+
+Controls had PRS values between **0.339 and 0.547**, with a mean of **0.490**. Cases had a higher mean PRS of **1.285** and a wider range of **0.315-1.864**. Thus, PRS provides an additional distinction between the RNA-seq groups: most cases had higher genetic-risk scores than controls. However, the separation was not complete because three cases had relatively low PRS values: d001, d239 and d104.
+
+The following plot shows the RNA-seq MDS coordinates after TMM normalisation and low-expression filtering. The first panel is coloured by disease group and the second panel is coloured continuously by PRS.
+
+```{r mds-prs, fig.width=11, fig.height=5}
+dge_mds <- dge
+
+dge_mds <- normLibSizes(dge_mds, method = "TMM")
+keep <- filterByExpr(dge_mds, group = dge_mds$samples$group)
+dge_mds <- dge_mds[keep, , keep.lib.sizes = FALSE]
+dge_mds$samples$group <- factor(
+  dge_mds$samples$group,
+  levels = c("control", "case")
+)
+
+mds <- plotMDS(dge_mds, plot = FALSE)
+mds_data <- dge_mds$samples %>%
+  rownames_to_column("sample") %>%
+  transmute(
+    sample,
+    donorid,
+    group,
+    MDS1 = mds$x,
+    MDS2 = mds$y
+  ) %>%
+  left_join(rna_prs %>% select(donorid, PRS), by = "donorid")
+
+p1 <- ggplot(mds_data, aes(MDS1, MDS2, colour = group, label = sample)) +
+  geom_point(size = 3) +
+  geom_text(vjust = -0.7, show.legend = FALSE, check_overlap = TRUE) +
+  scale_colour_manual(values = c(control = "#2166AC", case = "#B2182B")) +
+  theme_classic() +
+  labs(
+    title = "MDS coloured by RNA-seq group",
+    x = "MDS dimension 1",
+    y = "MDS dimension 2",
+    colour = "Disease status"
+  )
+
+p2 <- ggplot(mds_data, aes(MDS1, MDS2, colour = PRS, label = sample)) +
+  geom_point(size = 3) +
+  geom_text(vjust = -0.7, show.legend = FALSE, check_overlap = TRUE) +
+  scale_colour_viridis_c() +
+  theme_classic() +
+  labs(
+    title = "MDS coloured by PRS",
+    x = "MDS dimension 1",
+    y = "MDS dimension 2",
+    colour = "PRS"
+  )
+
+# Print the two panels separately so no additional plotting package is required.
+print(p1)
+print(p2)
+```
+
+The PRS colouring broadly follows the disease-status pattern: controls occupy the low-PRS range, whereas most case samples have higher PRS values. This indicates that genetic risk captured by these 15 loci is associated with the case-control distinction in this dataset, in addition to the transcriptional differences shown by the MDS plot. Nevertheless, PRS does not perfectly separate the samples and should not be treated as a diagnostic classifier.
+
+Age, exercise status and gait-treatment assignment cannot be used as reliable case-control discriminators for the RNA-seq samples. Only eight RNA-seq donors have corresponding records in the gait dataset, and these overlapping donors are all cases. Therefore, there are no matched RNA-seq controls with which to compare those variables.
+
+```{r gait-overlap}
+gait_overlap <- gait_data %>%
+  select(donorid, age, exercise, treatment) %>%
+  inner_join(sample_info %>% select(donorid, group), by = "donorid")
+
+gait_overlap %>%
+  count(group, name = "RNA-seq donors with gait metadata") %>%
+  knitr::kable()
+```
+
+# Question 5
+
+## Summary and future research
+
+Across the four clinical-trial arms, there were 16 unique patients, with four patients in each treatment-by-exercise group. The RNA-seq analysis showed that Parkinson's disease cases and healthy controls differed in their overall gene-expression profiles, although the sample-level separation was incomplete. The PRS provided an additional distinction: controls had low scores ranging from 0.339 to 0.547, whereas most cases had substantially higher scores, with a case mean of 1.285 compared with 0.490 in controls. However, several cases had low PRS values, demonstrating that this 15-locus score does not classify individuals perfectly. Targets of positive drug-screen hits, including RIT2, APBA3, MAPK1 and LARGE1, were also differentially expressed in the RNA-seq analysis and were associated with the GO category synaptic transmission. This overlap suggests that altered synaptic biology may be relevant to PD pathology in this dataset. In contrast, PRS was not significantly correlated with gait variability in the 16 clinical-trial patients (Pearson r = -0.183, p = 0.497; Spearman rho = -0.276, p = 0.300), whereas age, exercise and treatment showed stronger exploratory relationships with gait. Future research should validate these findings in larger independent cohorts, adjust for age, sex, ancestry, batch and disease-severity variables, and perform formal pathway-enrichment analyses using a clearly defined background gene set. Follow-up experiments should also test whether the candidate drug targets causally affect synaptic function and whether the compounds improve neuronal or behavioural phenotypes rather than merely changing assay measurements.
+
+## Reproducibility note
+
+This document uses only R code and the supplied `.Rda` files. The RNA-seq MDS plot uses `edgeR::plotMDS()`, and all PRS summaries are recalculated from the genotype dosage and GWAS beta values during rendering.
