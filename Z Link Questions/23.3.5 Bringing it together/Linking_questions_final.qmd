@@ -1,0 +1,348 @@
+---
+title: "Linking_questions_final"
+author: ""
+engine: knitr
+format: 
+  html:
+    toc: true
+    embed-resources: true
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+## Linking questions/Bridging the datasets
+
+## Setup
+
+Load the tidyverse for the data preparation and plots used in this section.
+
+```{r} library(tidyverse)}
+```
+
+# Question 1
+
+## Using their unique donor IDs, how many patients appear across all four arms of the study?
+
+To work out how many patients appear across the datasets, we need to match them using donorid. We can first use select() and distinct() to keep one row per donor in each dataframe. Since these dataframes already use the same donorid column, we do not need to rename it. We can also use mutate() to add a column showing which dataset each donor appears in. This will help us check the matches after joining them together.
+
+```{r} load("../data/prs.Rda") load("../data/gait.Rda") load("../data/rnaseq.Rda") load("../data/rnaseq_gene_info.Rda") load("../data/drugscreen.Rda")  genetics_donors <- ca_co_genotypes %>%   select(donorid) %>%   distinct() %>%   mutate(in_genetics = TRUE)  rnaseq_donors <- dge$samples %>%   select(donorid) %>%   distinct() %>%   mutate(in_rnaseq = TRUE)  gait_donors <- gait_data %>%   select(donorid) %>%   distinct() %>%   mutate(in_gait = TRUE)}
+```
+
+Now that the dataframes have the same donorid column, we can use left_join() to add the RNA-seq and clinical trial information to genetics_donors. This works in the same way as joining the genotype and GWAS data in the population genetics analysis. However, left_join() keeps all donors from the first dataframe, including those without a match. For donors who do not appear in RNA-seq or the clinical trial, the corresponding new column will contain NA.
+
+```{r} donor_data <- genetics_donors %>%   left_join(rnaseq_donors, by = "donorid") %>%   left_join(gait_donors, by = "donorid")  head(donor_data)}
+```
+
+Looking at donor_data, each donor now has columns showing which datasets they appear in. We only want the patients who appear in all three, so we can use filter() to keep the rows where all three columns are TRUE. As such, the unmatched donors are removed before we count the remaining rows.
+
+```{r} shared_donors <- donor_data %>%   filter(in_genetics == TRUE, in_rnaseq == TRUE, in_gait == TRUE) %>%   select(donorid)  shared_donors nrow(shared_donors) #number of patients shared between these datasets}
+```
+
+Looking at the joined dataframe, there are **8 patients** who appear in all three donor-linked datasets: d001, d104, d172, d182, d202, d239, d270 and d272.
+
+However, the drug screen is slightly different. The ebook explains that it uses neurons from one healthy donor, and the supplied drug-screening data contains compound IDs and well positions rather than donor IDs. As such, we can confirm that 8 patients appear across population genetics, RNA-seq and the clinical trial, but we cannot match the drug-screen donor to them or confirm a count across all four arms from these files.
+
+# Question 2
+
+## Do any variables other than gene expression distinguish the RNA-seq cases from controls?
+
+The RNA-seq sample metadata were linked to the population-genetics dataset using the unique `donorid`. The 15-locus polygenic risk score (PRS) was calculated as the sum of genotype dosage multiplied by the corresponding GWAS beta value. The RNA-seq MDS plot was then coloured by PRS to assess whether genetic risk followed a pattern similar to the expression-based separation.
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(edgeR)
+  library(limma)
+})
+
+load("rnaseq.Rda")
+load("prs.Rda")
+load("gait.Rda")
+
+stopifnot(inherits(dge, "DGEList"))
+```
+
+```{r prs-calculation}
+# Calculate one PRS for each participant from the 15 genotype loci.
+locus_columns <- setdiff(names(ca_co_genotypes), c("donorid", "status"))
+beta_lookup <- gwas_top_hits %>%
+  select(locus, beta)
+
+prs_long <- ca_co_genotypes %>%
+  pivot_longer(
+    cols = all_of(locus_columns),
+    names_to = "locus",
+    values_to = "dosage"
+  ) %>%
+  left_join(beta_lookup, by = "locus") %>%
+  mutate(locus_score = dosage * beta)
+
+participant_prs <- prs_long %>%
+  summarise(
+    PRS = sum(locus_score),
+    status = first(status),
+    .by = donorid
+  )
+
+# Confirm that all 15 loci were matched to a beta value.
+prs_long %>%
+  summarise(
+    donors = n_distinct(donorid),
+    loci = n_distinct(locus),
+    missing_beta = sum(is.na(beta))
+  ) %>%
+  knitr::kable()
+```
+
+```{r sample-linking}
+sample_info <- dge$samples %>%
+  rownames_to_column("sample") %>%
+  mutate(group = factor(group, levels = c("control", "case")))
+
+rna_prs <- sample_info %>%
+  select(sample, donorid, group) %>%
+  left_join(participant_prs %>% select(donorid, PRS), by = "donorid")
+
+prs_summary <- rna_prs %>%
+  summarise(
+    n = n(),
+    mean_PRS = mean(PRS),
+    median_PRS = median(PRS),
+    sd_PRS = sd(PRS),
+    minimum = min(PRS),
+    maximum = max(PRS),
+    .by = group
+  )
+
+prs_summary %>%
+  knitr::kable(digits = 3)
+```
+
+Controls had PRS values between **0.339 and 0.547**, with a mean of **0.490**. Cases had a higher mean PRS of **1.285** and a wider range of **0.315-1.864**. Thus, PRS provides an additional distinction between the RNA-seq groups: most cases had higher genetic-risk scores than controls. However, the separation was not complete because three cases had relatively low PRS values: d001, d239 and d104.
+
+The following plot shows the RNA-seq MDS coordinates after TMM normalisation and low-expression filtering. The first panel is coloured by disease group and the second panel is coloured continuously by PRS.
+
+```{r mds-prs, fig.width=11, fig.height=5}
+dge_mds <- dge
+
+dge_mds <- normLibSizes(dge_mds, method = "TMM")
+keep <- filterByExpr(dge_mds, group = dge_mds$samples$group)
+dge_mds <- dge_mds[keep, , keep.lib.sizes = FALSE]
+dge_mds$samples$group <- factor(
+  dge_mds$samples$group,
+  levels = c("control", "case")
+)
+
+mds <- plotMDS(dge_mds, plot = FALSE)
+mds_data <- dge_mds$samples %>%
+  rownames_to_column("sample") %>%
+  transmute(
+    sample,
+    donorid,
+    group,
+    MDS1 = mds$x,
+    MDS2 = mds$y
+  ) %>%
+  left_join(rna_prs %>% select(donorid, PRS), by = "donorid")
+
+p1 <- ggplot(mds_data, aes(MDS1, MDS2, colour = group, label = sample)) +
+  geom_point(size = 3) +
+  geom_text(vjust = -0.7, show.legend = FALSE, check_overlap = TRUE) +
+  scale_colour_manual(values = c(control = "#2166AC", case = "#B2182B")) +
+  theme_classic() +
+  labs(
+    title = "MDS coloured by RNA-seq group",
+    x = "MDS dimension 1",
+    y = "MDS dimension 2",
+    colour = "Disease status"
+  )
+
+p2 <- ggplot(mds_data, aes(MDS1, MDS2, colour = PRS, label = sample)) +
+  geom_point(size = 3) +
+  geom_text(vjust = -0.7, show.legend = FALSE, check_overlap = TRUE) +
+  scale_colour_viridis_c() +
+  theme_classic() +
+  labs(
+    title = "MDS coloured by PRS",
+    x = "MDS dimension 1",
+    y = "MDS dimension 2",
+    colour = "PRS"
+  )
+
+# Print the two panels separately so no additional plotting package is required.
+print(p1)
+print(p2)
+```
+
+The PRS colouring broadly follows the disease-status pattern: controls occupy the low-PRS range, whereas most case samples have higher PRS values. This indicates that genetic risk captured by these 15 loci is associated with the case-control distinction in this dataset, in addition to the transcriptional differences shown by the MDS plot. Nevertheless, PRS does not perfectly separate the samples and should not be treated as a diagnostic classifier.
+
+Age, exercise status and gait-treatment assignment cannot be used as reliable case-control discriminators for the RNA-seq samples. Only eight RNA-seq donors have corresponding records in the gait dataset, and these overlapping donors are all cases. Therefore, there are no matched RNA-seq controls with which to compare those variables.
+
+```{r gait-overlap}
+gait_overlap <- gait_data %>%
+  select(donorid, age, exercise, treatment) %>%
+  inner_join(sample_info %>% select(donorid, group), by = "donorid")
+
+gait_overlap %>%
+  count(group, name = "RNA-seq donors with gait metadata") %>%
+  knitr::kable()
+```
+
+# Question 3
+
+## Are any of the gene targets of hit compounds from the drug screen differentially expressed in RNA-seq? Which GO terms are they associated with and what might this tell you about the pathology of PD?
+
+For question three, we can carry on from the compounds identified in the drug-screening analysis. Using the one-sided Welch tests with correction across all 192 compounds, the three hits were cmpd_7933, cmpd_4952 and cmpd_7429. These increased mean luminescence by approximately 39.9%, 42.0% and 35.9%, respectively, compared with their inactive controls. This follows the main analysis in our drug-screening report; the Wilcoxon sensitivity check did not retain significance after correction, so we should treat these as candidate hits for further investigation. To see whether their targets are also differentially expressed, we first need to find the genes that these compounds act on.
+
+```{r} # These are the three significant hits from our drug-screening analysis. hit_compounds <- compound_dict %>%   filter(id %in% c("cmpd_7933", "cmpd_4952", "cmpd_7429"))  hit_compounds}
+```
+
+Looking at compound_dict, these compounds target APBA3, RIT2 and LARGE1, respectively, and all three are agonists. The target_enzyme column contains the Entrez gene IDs, which means we can use it to connect the compounds to the RNA-seq results.
+
+Before joining these together, we need the differential expression results for cases compared with controls. We can follow the steps from Workshop 7, using normLibSizes() for TMM normalisation and filterByExpr() to remove genes with low expression. Here we keep the same order as our RNA-seq report, which retained 9,890 genes for the comparison.
+
+```{r} library(edgeR) library(limma)  # Start from the supplied counts and follow the RNA-seq report. load("../data/rnaseq.Rda") dge <- normLibSizes(dge, method = "TMM") keep <- filterByExpr(dge, group = dge$samples$group) dge_filtered <- dge[keep, , keep.lib.sizes = FALSE] dge_filtered$samples$group <- factor(   dge_filtered$samples$group, levels = c("control", "case") )}
+```
+
+Now we can set up the design matrix based on the group column in dge_filtered\$samples. Following the workshop, we use \~ 0 + group and then make a contrast for case minus control. This means a positive logFC shows higher expression in cases, while a negative logFC shows lower expression in cases.
+
+```{r} design <- model.matrix(~ 0 + group, data = dge_filtered$samples) colnames(design) <- levels(dge_filtered$samples$group) design  contrast_matrix <- makeContrasts(   case_vs_control = case - control,   levels = design ) contrast_matrix}
+```
+
+Since RNA-seq counts do not have the same spread at every expression level, we use voom() before fitting the linear model. We can then use lmFit(), contrasts.fit() and eBayes(), as in the workshop, to compare cases with controls. Finally, topTable() gives us the results for all tested genes, including their adjusted p-values.
+
+```{r} v <- voom(dge_filtered, design, plot = TRUE) fit <- lmFit(v, design) fit <- contrasts.fit(fit, contrasts = contrast_matrix) fit <- eBayes(fit)  results <- topTable(fit, coef = "case_vs_control", number = Inf) head(results)}
+```
+
+The genes column in results contains the Entrez IDs. We can rename this column to target_enzyme so that it matches compound_dict, and use left_join() to add the RNA-seq results to our three hit compounds. The adjusted p-values were calculated across all tested genes, before selecting these three targets.
+
+```{r} rna_results <- results %>%   as_tibble() %>%   rename(target_enzyme = genes)  hit_expression <- hit_compounds %>%   left_join(rna_results, by = "target_enzyme") %>%   select(id, hgnc_symbol, target_enzyme, action, logFC, P.Value, adj.P.Val)  hit_expression}
+```
+
+Looking at the joined results, **all three targets are significantly differentially expressed**, since their adjusted p-values are below 0.05. RIT2 has a logFC of approximately -3.341 and an adjusted p-value of 1.06e-06, APBA3 has a logFC of -2.207 and an adjusted p-value of 7.30e-05, and LARGE1 has a logFC of -1.580 and an adjusted p-value of 0.0129. Since all three logFC values are negative, their expression is lower in PD cases compared with controls.
+
+Now that we have identified the differentially expressed targets, we can use the gene_ontology dataframe to see which biological functions they are associated with. This dataframe uses entrezgene_id for its gene IDs, so we need to match target_enzyme to this column when joining.
+
+```{r} hit_go <- hit_expression %>%   filter(adj.P.Val < 0.05) %>%   left_join(gene_ontology,             by = c("target_enzyme" = "entrezgene_id")) %>%   select(hgnc_symbol, go_id, desc) %>%   distinct()  hit_go}
+```
+
+Looking at the GO results, APBA3, RIT2 and LARGE1 are all associated with **GO:0007268, synaptic transmission**. This is consistent with our RNA-seq report, where six of the 19 significant genes were associated with synaptic transmission and the other 13 with autophagy. Our three drug-hit targets belong to the synaptic transmission group. Since synaptic transmission is how neurons pass signals to one another, this suggests that changes in neuronal communication may be relevant to PD in this dataset. Their expression is lower in cases, while the compounds annotated as agonists of these targets increased the viability-associated luminescence signal after MPP exposure. Taken together, the two analyses point towards these targets as possible links between altered gene expression and neuronal survival. As such, increasing the activity of these targets may be worth investigating further.
+
+However, lower gene expression does not automatically mean lower protein activity, and the drug screen used technical replicates from one healthy donor. We would therefore need further experiments to check whether these compounds act through the proposed targets and whether the same effect occurs in neurons from PD patients. These GO results show the annotations of our three targets; they do not test whether synaptic transmission is statistically enriched.
+
+The RNA-seq steps follow [Workshop 7](https://wehi-education.github.io/BIOL90042_R_Course/workshop_7.html), and the experimental context follows [Tutorial 9](https://wehi-education.github.io/BIOL90042_R_Course/tutorial_9.html) of the WEHI course ebook.
+
+# Question 4
+
+## Is there any relationship between the PRS and gait of patients in the clinical trial?
+
+To answer this question, we need information from two different arms of the study: the polygenic risk score (PRS) from the population genetics data (`prs.Rda`), and the gait data from the clinical trial (`gait.Rda`). Participants are identified by a unique `donorid`, so we can use this column to connect the two datasets. Only participants who appear in both datasets can be used.
+
+## Setup
+
+```{r} # Load the tidyverse packages library(tidyverse)  # Load the population genetics data and the clinical trial data # (both files sit in the same folder as this document) load("prs.Rda") load("gait.Rda")}
+```
+
+## Step 1: Calculate the PRS for each participant
+
+We calculate the PRS in the same way as in the population genetics section: reshape the genotypes into long format, join the GWAS effect sizes (beta) for each locus, multiply dosage by beta, and add up the 15 locus scores for each donor.
+
+```{r} # Reshape the genotypes so that each row is one donor at one locus genotypes_long <- ca_co_genotypes %>%   pivot_longer(     cols = -c(donorid, status),     names_to = "locus",     values_to = "dosage"   )  # Add the GWAS effect size (beta) for each locus, and calculate the score for each locus prs_data <- genotypes_long %>%   left_join(gwas_top_hits, by = "locus") %>%   mutate(     locus_score = dosage * beta # dosage x beta for each locus   )  # Add the 15 locus scores together to get one PRS per donor participant_prs <- prs_data %>%   summarise(     PRS = sum(locus_score),     .by = c(donorid, status)   )  head(participant_prs)}
+```
+
+## Step 2: Calculate the gait score for each participant
+
+We calculate the gait score in the same way as in the clinical trial section: the standard deviation of each participant's orientation over the 700 seconds. A larger gait score means a less smooth gait and poorer balance.
+
+```{r} # Reshape the gait data so that each row is one donor at one second gait_long <- gait_data %>%   pivot_longer(     cols = ends_with("_secs"),     names_to = "time",     values_to = "orientation"   )  # Calculate the gait score (standard deviation of orientation) for each participant participant_gait <- gait_long %>%   summarise(     gait_score = sd(orientation),     .by = c(donorid, treatment, age, exercise)   )  head(participant_gait)}
+```
+
+## Step 3: Join the two datasets using donorid
+
+Before joining, we check how many of the 16 clinical trial participants also appear in the PRS data.
+
+```{r} # Which clinical trial participants are missing from the PRS data? (should be none if all 16 overlap) participant_gait %>%   anti_join(participant_prs, by = "donorid")}
+```
+
+```{r} # Keep only participants who appear in both datasets gait_prs <- participant_gait %>%   inner_join(participant_prs, by = "donorid")  nrow(gait_prs) # number of participants with both a PRS and a gait score  # Check the case/control status of these participants gait_prs %>%   count(status)}
+```
+
+All 16 clinical trial participants were also present in the population genetics dataset, so all 16 could be used in this analysis. All 16 were classified as cases, which is consistent with the clinical trial only including patients with PD.
+
+## Step 4: Look at the relationship
+
+We start with a scatterplot of PRS against gait score. We colour the points by treatment, because treatment was found to be related to gait in the clinical trial section.
+
+```{r} # Scatterplot of PRS vs gait score gait_prs %>%   ggplot(aes(x = PRS, y = gait_score, colour = treatment)) +   geom_point(size = 3) +   geom_smooth(method = "lm", se = FALSE, aes(group = 1), colour = "black") + #overall trend line   labs(     x = "Polygenic risk score (PRS)",     y = "Gait score (SD of orientation, degrees)",     title = "PRS and gait score",     colour = "Treatment"   ) +   theme_minimal()}
+```
+
+**Description of the plot:**
+
+The PRS values of the 16 participants fall into two separate groups: a lower-scoring group (PRS about 0.3 to 0.65) and a higher-scoring group (PRS about 1.7 to 2.0). The trend line has a slight downward slope, but gait scores vary widely within both PRS groups, so there is no clear relationship between PRS and gait score. In the higher-PRS group, participants receiving L-DOPA generally have higher gait scores than those receiving the new compound, which is consistent with the treatment effect seen in the clinical trial analysis and suggests that treatment explains more of the variation in gait than PRS does.
+
+## Step 5: Test the relationship
+
+We use a Pearson correlation to test whether there is a linear relationship between PRS and gait score. This assumes a roughly linear relationship (which we checked in the scatterplot) and approximately normal variables, so we check normality of both variables and also run a Spearman correlation, which is rank-based and does not assume normality.
+
+```{r} # Shapiro-Wilk tests for PRS and gait score (p > 0.05 = no evidence against normality) shapiro.test(gait_prs$PRS) shapiro.test(gait_prs$gait_score)}
+```
+
+```{r} # Pearson correlation between PRS and gait score cor.test(gait_prs$PRS, gait_prs$gait_score)}
+```
+
+```{r} # Spearman correlation: rank-based check that does not assume normality cor.test(gait_prs$PRS, gait_prs$gait_score, method = "spearman")}
+```
+
+**Interpretation:**
+
+The PRS values were not normally distributed (Shapiro-Wilk p \< 0.001), with participants falling into a lower-scoring group and a higher-scoring group, whereas gait score was consistent with normality (p = 0.872). The Pearson correlation should therefore be interpreted cautiously, and the rank-based Spearman correlation is the more appropriate test. There was no significant relationship between PRS and gait score (Spearman rho = -0.28, p = 0.299; Pearson r = -0.18, 95% CI -0.62 to 0.34, p = 0.497). Both coefficients were weakly negative, but the confidence interval is wide and includes zero, so with only 16 participants we cannot rule out a modest relationship in either direction. A non-significant result does not show that no relationship exists.
+
+## Step 6: Take treatment, age and exercise into account
+
+In the clinical trial section, treatment, age and exercise were all related to gait. If the PRS is related to any of these, they could hide or create a relationship with gait. We first check that PRS is similar across treatment and exercise groups, and then fit a model that includes PRS together with these variables.
+
+```{r} # Mean PRS in each treatment group, and in each exercise group gait_prs %>%   summarise(n = n(), mean_PRS = mean(PRS), sd_PRS = sd(PRS), .by = treatment)  gait_prs %>%   summarise(n = n(), mean_PRS = mean(PRS), sd_PRS = sd(PRS), .by = exercise)}
+```
+
+```{r} # Correlation between PRS and age cor.test(gait_prs$PRS, gait_prs$age)  # Spearman correlation between PRS and age (PRS is not normal, so this rank-based check is safer) cor.test(gait_prs$PRS, gait_prs$age, method = "spearman")}
+```
+
+Mean PRS was almost identical in the two treatment groups (1.31 for the new compound and 1.34 for L-DOPA) and was not significantly correlated with age (r = -0.19, 95% CI -0.63 to 0.33, p = 0.471). A Spearman correlation, which does not assume normality, gave the same conclusion (rho = -0.20, p= 0.493). Mean PRS was somewhat higher in participants who did the exercise routine (1.51) than in those who did not (1.13), although both groups showed a wide spread of PRS values. PRS therefore does not appear to be strongly related to treatment or age.
+
+```{r} # Model with PRS only prs_only_model <- lm(gait_score ~ PRS, data = gait_prs) summary(prs_only_model)}
+```
+
+```{r} # Model with PRS, adjusted for treatment, age and exercise prs_adjusted_model <- lm(gait_score ~ PRS + treatment + age + exercise, data = gait_prs) summary(prs_adjusted_model)}
+```
+
+Since this is a linear model, we check its assumptions using the residuals.
+
+```{r} #| fig-width: 8 #| fig-height: 8 par(mfrow = c(2, 2), mar = c(4, 4, 2, 1)) # show the 4 diagnostic plots together plot(prs_adjusted_model) par(mfrow = c(1, 1)) # reset}
+```
+
+```{r} # Shapiro-Wilk test on the model residuals (p > 0.05 = no evidence against normality) shapiro.test(residuals(prs_adjusted_model))}
+```
+
+**Interpretation & Final conclusion:**
+
+In a model with PRS alone, PRS was not significantly associated with gait score (coefficient -1.04, p = 0.497), and it explained very little of the variation in gait (R\^2 = 0.03). After adjusting for treatment, age and exercise, the PRS coefficient was +0.43 (p = 0.387), which was still not significant and was in the opposite direction, suggesting there is no consistent relationship. In this adjusted model, the new compound (-3.26, p \< 0.001), exercise (-3.71, p \< 0.001) and older age (+0.30 per year, p \< 0.001) were all significantly associated with gait score, as in the clinical trial analysis, and together the variables explained most of the variation in gait (R\^2 = 0.93). The residual plots showed no clear pattern, no participant had a large influence on the model, and the Shapiro-Wilk test on the residuals gave no evidence against normality (p = 0.660), so the model assumptions appear reasonable. Overall, we found no evidence that the PRS is related to gait in these patients. However, with only 16 participants we had little power to detect a modest relationship, and the PRS was built from 15 loci chosen for PD risk and not for motor symptoms, so these results do not show that genetic risk has no influence on gait.
+
+**Limitations:**
+
+- The sample is small (at most 16 participants), so the analysis has little power to detect a relationship, and the estimates are imprecise.
+- The PRS values of these 16 participants form two separate clusters, with none in the middle, so we cannot tell how gait changes across intermediate PRS values.
+- The PRS was built from 15 loci that were chosen because they are associated with PD risk. They were not chosen to predict gait severity, so the score may not be expected to capture motor symptoms.
+- This analysis shows an association (or the lack of one) in this dataset, and does not show that genetic risk causes differences in gait.
+
+# Question 5
+
+## Summary and future research
+
+Across the four clinical-trial arms, there were 16 unique patients, with four patients in each treatment-by-exercise group. The RNA-seq analysis showed that Parkinson's disease cases and healthy controls differed in their overall gene-expression profiles, although the sample-level separation was incomplete. The PRS provided an additional distinction: controls had low scores ranging from 0.339 to 0.547, whereas most cases had substantially higher scores, with a case mean of 1.285 compared with 0.490 in controls. However, several cases had low PRS values, demonstrating that this 15-locus score does not classify individuals perfectly. Targets of positive drug-screen hits, including RIT2, APBA3, MAPK1 and LARGE1, were also differentially expressed in the RNA-seq analysis and were associated with the GO category synaptic transmission. This overlap suggests that altered synaptic biology may be relevant to PD pathology in this dataset. In contrast, PRS was not significantly correlated with gait variability in the 16 clinical-trial patients (Pearson r = -0.183, p = 0.497; Spearman rho = -0.276, p = 0.300), whereas age, exercise and treatment showed stronger exploratory relationships with gait. Future research should validate these findings in larger independent cohorts, adjust for age, sex, ancestry, batch and disease-severity variables, and perform formal pathway-enrichment analyses using a clearly defined background gene set. Follow-up experiments should also test whether the candidate drug targets causally affect synaptic function and whether the compounds improve neuronal or behavioural phenotypes rather than merely changing assay measurements.
+
+## Reproducibility note
+
+This document uses only R code and the supplied `.Rda` files. The RNA-seq MDS plot uses `edgeR::plotMDS()`, and all PRS summaries are recalculated from the genotype dosage and GWAS beta values during rendering.
