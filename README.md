@@ -7,7 +7,7 @@ Hello markers!
 So as you can tell we've only got three group members....hurray~! 
 
 Each of us, did our own sections: 
-Ratnpriya = Clinical Trail 
+Ratnpriya = Clinical Trial 
 Sunny = Population Genetics 
 Yidi = RNA-seq
 Joint effort = Drug Screening! 
